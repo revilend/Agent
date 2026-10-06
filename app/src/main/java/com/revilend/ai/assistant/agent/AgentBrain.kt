@@ -20,7 +20,7 @@ class AgentBrain(private val context: Context) {
         private const val TAG = "AgentBrain"
         private const val API_URL = "https://api.groq.com/openai/v1/chat/completions"
         private const val MODEL = "openai/gpt-oss-120b"
-        private const val API_KEY = "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" 
+        private const val API_KEY = "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"
         private const val TIMEOUT_SECONDS = 60L
     }
 

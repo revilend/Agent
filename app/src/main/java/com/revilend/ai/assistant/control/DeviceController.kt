@@ -1,6 +1,5 @@
 package com.revilend.ai.assistant.control
 
-import android app
 import android.app.ActivityManager
 import android.app.AlarmManager
 import android.app.PendingIntent
@@ -8,10 +7,9 @@ import android.bluetooth.BluetoothAdapter
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.hardware.Camera
 import android.hardware.camera2.CameraManager
 import android.media.AudioManager
-import android.media.session.MediaSessionManager
+import android.media.RingtoneManager
 import android.net.wifi.WifiInfo
 import android.net.wifi.WifiManager
 import android.os.BatteryManager
@@ -23,10 +21,13 @@ import android.os.Vibrator
 import android.telephony.SmsManager
 import android.provider.Settings
 import android.webkit.WebView
+import android.webkit.WebViewClient
+import android.util.Log
 import androidx.core.content.ContextCompat
 import com.google.gson.Gson
-import com.revilend.ai.assistant.MainApp
 import com.revilend.ai.assistant.util.PreferencesManager
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 class DeviceController(private val context: Context) {
 
@@ -76,7 +77,7 @@ class DeviceController(private val context: Context) {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             try {
                 val cameraId = cameraManager?.cameraIdList?.firstOrNull()
-                if (cameraId != null && cameraManager?.hasFlashUnit() == true) {
+                if (cameraId != null) {
                     isTorchOn = !isTorchOn
                     cameraManager?.setTorchMode(cameraId, isTorchOn)
                     Log.d(TAG, "Torch: ${if (isTorchOn) "ON" else "OFF"}")

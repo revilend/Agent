@@ -140,14 +140,14 @@ class AgentAccessibilityService : AccessibilityService() {
     }
 
     private fun findNodeRecursive(node: AccessibilityNodeInfo, text: String): AccessibilityNodeInfo? {
-        node.text?.let { nodeText ->
-            if (nodeText.contains(text, ignoreCase = true)) {
-                return node.copy()
-            }
-        }
         node.contentDescription?.let { desc ->
             if (desc.contains(text, ignoreCase = true)) {
-                return node.copy()
+                return@findNodeRecursive node.copy()
+            }
+        }
+        node.text?.let { nodeText ->
+            if (nodeText.contains(text, ignoreCase = true)) {
+                return@findNodeRecursive node.copy()
             }
         }
         if (node.childCount > 0) {
@@ -176,7 +176,7 @@ class AgentAccessibilityService : AccessibilityService() {
     private fun findNodeByIdRecursive(node: AccessibilityNodeInfo, id: String): AccessibilityNodeInfo? {
         node.viewIdResourceName?.let { viewId ->
             if (viewId.contains(id, ignoreCase = true)) {
-                return node.copy()
+                return@findNodeByIdRecursive node.copy()
             }
         }
         if (node.childCount > 0) {
@@ -351,7 +351,7 @@ class AgentAccessibilityService : AccessibilityService() {
             return
         }
         try {
-            lastFocusedNode?.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, bundleOf(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_KEY to text))
+            lastFocusedNode?.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, createBundleForSetText(text))
             Log.d(TAG, "Text set: $text")
             reportActionStatus("type_text", "Typed: $text")
         } catch (e: Exception) {
@@ -529,9 +529,9 @@ class AgentAccessibilityService : AccessibilityService() {
         val data: java.util.Map<String, Any>? = null
     )
 
-    private fun bundleOf(pair: Pair<Any, Any>): android.os.Bundle {
+    private fun createBundleForSetText(text: String): android.os.Bundle {
         return android.os.Bundle().apply {
-            putString("key", pair.second as? String)
+            putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_KEY, text)
         }
     }
 }
