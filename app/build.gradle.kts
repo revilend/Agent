@@ -47,7 +47,7 @@ dependencies {
     implementation("com.google.android.material:material:1.11.0")
     implementation("androidx.constraintlayout:constraintlayout:2.1.4")
     implementation("androidx.activity:activity-ktx:1.8.2")
-    implementation("androidx.core:core-service:1.12.0")
+
 
     // Networking
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
