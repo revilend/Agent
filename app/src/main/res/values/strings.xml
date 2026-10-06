@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Revilend AI</string>
+    <string name="app_subtitle">Autonomous Super Assistant</string>
+    <string name="access_description">Revilend AI - Shaxsiy avtonom yordamchi agent</string>
+
+    <!-- HUD -->
+    <string name="hud_title">Floating HUD</string>
+    <string name="hud_description">Revilend AI ni barcha ilovalar ustida koʻrishingiz uchun</string>
+
+    <!-- Voice -->
+    <string name="voice_feedback">Voice Feedback</string>
+    <string name="voice_feedback_description">Tinglash va javob berish uchun</string>
+    <string name="glow_effect">Glow Effect</string>
+    <string name="glow_effect_description">HUD yorugʼlik effekti</string>
+
+    <!-- Permissions -->
+    <string name="permissions_title">Ruxsatlar</string>
+    <string name="accessibility_title">Accessibility Xizmati</string>
+    <string name="accessibility_description">Ekronda elementlarga boshqarish uchun</string>
+    <string name="accessibility_guide_title">Revilend AI Access Xizmati</string>
+    <string name="accessibility_guide_message">Revilend AI sizning telefoningizni avtonom boshqarish imkonini beradi. Bu xizmat ekrandagi elementlarga kirish va boshqarish uchun kerak.</string>
+    <string name="accessibility_status_granted">✅ Joylashtirilgan</string>
+    <string name="accessibility_status_not_granted">❌ Ruxsatsiz</string>
+
+    <string name="overlay_title">Overlay Ruxsati</string>
+    <string name="overlay_description">HUDni boshqa ilovalar ustida koʻrsatish uchun</string>
+    <string name="overlay_status_granted">✅ Grantylangan</string>
+    <string name="overlay_status_not_granted">❌ Ruxsatsiz</string>
+    <string name="overlay_permission_message">Revilend AI toʻgʻridan-toʻgʻri ekraningizda HUD koʻrsatishi uchun "Boshqa o aplikatsiyalar oldidagi muhit" ruxsatiga ega boʻlishi kerak.</string>
+
+    <string name="other_permissions_title">Boshqa Ruxsatlar</string>
+    <string name="microphone">Mikrofon</string>
+    <string name="camera">Kamera / Flashlight</string>
+    <string name="notifications">Xabarlar</string>
+
+    <string name="microphone_phone">Mikrofon &amp; Telefon</string>
+    <string name="microphone_phone_description">Ovozli buyruqlar va SMS/telefon uchun</string>
+    <string name="camera_flashlight">Kamera &amp; Flashlight</string>
+    <string name="camera_flashlight_description">Flashlight boshqaruvi uchun</string>
+    <string name="notifications_title">Xabarlar</string>
+    <string name="notifications_description">Notification chimagani koʻrish uchun</string>
+
+    <!-- Actions -->
+    <string name="voice_command">Ovozli buyruq</string>
+    <string name="about">Haqida</string>
+    <string name="open_settings">Sozlamalarni oching</string>
+    <string name="cancel">Bekor qilish</string>
+    <string name="ok">OK</string>
+
+    <string name="tap_to_listen">Boʻlishingiz uchun tugmani bosing</string>
+    <string name="listening">Tinglamoqda...</string>
+    <string name="processing">Tahlil qilinmoqda...</string>
+    <string name="no_permission">Iltimos, dasturga kerakli ruxsatlar bering</string>
+    <string name="error_occurred">Xato yuz berdi</string>
+    <string name="retry">Qayta urinish</string>
+
+    <string name="hint">Revilend AI</string>
+
+    <!-- Voice intro -->
+    <string name="voice_intro_uz">Revilend AI tayyor, sizni tinglamoqdaman.</string>
+    <string name="voice_intro_ru">Revilend AI готов, я вас слушаю.</string>
+    <string name="voice_intro_en">Revilend AI ready, I\'m listening.</string>
+</resources>
