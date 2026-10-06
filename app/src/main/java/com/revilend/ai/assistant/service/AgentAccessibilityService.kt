@@ -93,7 +93,7 @@ class AgentAccessibilityService : AccessibilityService() {
                 updateRootNode()
             }
             AccessibilityEvent.TYPE_VIEW_FOCUSED -> {
-                lastFocusedNode = event.source?.copy() ?: return
+                lastFocusedNode = event.source?.let { AccessibilityNodeInfo.obtain(it) } ?: return
                 Log.d(TAG, "View focused: ${lastFocusedNode?.text}")
             }
             AccessibilityEvent.TYPE_VIEW_CLICKED -> {
@@ -141,13 +141,13 @@ class AgentAccessibilityService : AccessibilityService() {
 
     private fun findNodeRecursive(node: AccessibilityNodeInfo, text: String): AccessibilityNodeInfo? {
         node.contentDescription?.let { desc ->
-            if (desc.contains(text, ignoreCase = true)) {
-                return@findNodeRecursive node.copy()
+            if (desc.toString().contains(text, ignoreCase = true)) {
+                return@findNodeRecursive AccessibilityNodeInfo.obtain(node)
             }
         }
         node.text?.let { nodeText ->
-            if (nodeText.contains(text, ignoreCase = true)) {
-                return@findNodeRecursive node.copy()
+            if (nodeText.toString().contains(text, ignoreCase = true)) {
+                return@findNodeRecursive AccessibilityNodeInfo.obtain(node)
             }
         }
         if (node.childCount > 0) {
@@ -176,7 +176,7 @@ class AgentAccessibilityService : AccessibilityService() {
     private fun findNodeByIdRecursive(node: AccessibilityNodeInfo, id: String): AccessibilityNodeInfo? {
         node.viewIdResourceName?.let { viewId ->
             if (viewId.contains(id, ignoreCase = true)) {
-                return@findNodeByIdRecursive node.copy()
+                return@findNodeByIdRecursive AccessibilityNodeInfo.obtain(node)
             }
         }
         if (node.childCount > 0) {
@@ -218,48 +218,29 @@ class AgentAccessibilityService : AccessibilityService() {
     }
 
     private fun findClickableParent(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
-        if (node.isClickable) return node.copy()
+        if (node.isClickable) return AccessibilityNodeInfo.obtain(node)
         if (node.parent != null) {
             return findClickableParent(node.parent)
         }
         return null
     }
 
-    fun performGlobalAction(action: Int) {
-        when (action) {
-            GLOBAL_ACTION_HOME -> {
-                performGlobalAction(GLOBAL_ACTION_HOME)
-                Log.d(TAG, "Global HOME")
-                speak("Bosh sahifaga qaytildi")
-            }
-            GLOBAL_ACTION_BACK -> {
-                performGlobalAction(GLOBAL_ACTION_BACK)
-                Log.d(TAG, "Global BACK")
-                speak("Orqaga qaytildi")
-            }
-            GLOBAL_ACTION_RECENTS -> {
-                performGlobalAction(GLOBAL_ACTION_RECENTS)
-                Log.d(TAG, "Global RECENTS")
-                speak("Joriy vazifalar")
-            }
-            GLOBAL_ACTION_NOTIFICATIONS -> {
-                performGlobalAction(GLOBAL_ACTION_NOTIFICATIONS)
-                Log.d(TAG, "Global NOTIFICATIONS")
-                speak("Xabarlar ochildi")
-            }
-            GLOBAL_ACTION_QUICK_SETTINGS -> {
-                performGlobalAction(GLOBAL_ACTION_QUICK_SETTINGS)
-                Log.d(TAG, "Global QUICK_SETTINGS")
-                speak("Tezkor sozlamalar")
-            }
-            GLOBAL_ACTION_LOCK_SCREEN -> {
-                performGlobalAction(GLOBAL_ACTION_LOCK_SCREEN)
-                Log.d(TAG, "Global LOCK_SCREEN")
-                speak("Ekranda qoflangan")
-            }
-            else -> {
-                Log.w(TAG, "Unknown global action: $action")
-            }
+    fun performAgentGlobalAction(action: Int) {
+        val spoken = when (action) {
+            GLOBAL_ACTION_HOME -> "Bosh sahifaga qaytildi"
+            GLOBAL_ACTION_BACK -> "Orqaga qaytildi"
+            GLOBAL_ACTION_RECENTS -> "Joriy vazifalar"
+            GLOBAL_ACTION_NOTIFICATIONS -> "Xabarlar ochildi"
+            GLOBAL_ACTION_QUICK_SETTINGS -> "Tezkor sozlamalar"
+            GLOBAL_ACTION_LOCK_SCREEN -> "Ekranda qoflangan"
+            else -> null
+        }
+        performGlobalAction(action)
+        if (spoken != null) {
+            Log.d(TAG, "Global action executed: $action")
+            speak(spoken)
+        } else {
+            Log.w(TAG, "Unknown global action: $action")
         }
     }
 
@@ -270,7 +251,7 @@ class AgentAccessibilityService : AccessibilityService() {
                     moveTo(x.toFloat(), y.toFloat())
                 }
                 val gesture = GestureDescription.Builder()
-                    .addStroke(GestureDescription.StrokeDescription(path, 0))
+                    .addStroke(GestureDescription.StrokeDescription(path, 0L, 100L))
                     .build()
                 dispatchGesture(gesture, null, null)
                 Log.d(TAG, "Tapped at: $x, $y")
@@ -291,7 +272,7 @@ class AgentAccessibilityService : AccessibilityService() {
                 }
                 val duration = 500L
                 val gesture = GestureDescription.Builder()
-                    .addStroke(GestureDescription.StrokeDescription(path, duration))
+                    .addStroke(GestureDescription.StrokeDescription(path, 0L, duration))
                     .build()
                 dispatchGesture(gesture, null, null)
                 Log.d(TAG, "Long pressed at: $x, $y")
@@ -310,7 +291,7 @@ class AgentAccessibilityService : AccessibilityService() {
                     lineTo(toX.toFloat(), toY.toFloat())
                 }
                 val gesture = GestureDescription.Builder()
-                    .addStroke(GestureDescription.StrokeDescription(path, duration))
+                    .addStroke(GestureDescription.StrokeDescription(path, 0L, duration))
                     .build()
                 dispatchGesture(gesture, null, null)
                 Log.d(TAG, "Swiped from ($fromX,$fromY) to ($toX,$toY)")
@@ -362,7 +343,7 @@ class AgentAccessibilityService : AccessibilityService() {
     fun typeAndSubmit(text: String) {
         setText(text)
         handler.postDelayed({
-            performGlobalAction(GLOBAL_ACTION_BACK)
+            performAgentGlobalAction(GLOBAL_ACTION_BACK)
         }, 200)
     }
 
@@ -466,16 +447,16 @@ class AgentAccessibilityService : AccessibilityService() {
                 scroll(direction)
             }
             "open_app" -> {
-                val package = action.target ?: action.data?.get("package") as? String ?: ""
-                openApp(package)
+                val pkgName = action.target ?: action.data?.get("package") as? String ?: ""
+                openApp(pkgName)
             }
             "global" -> {
                 when (action.target?.uppercase()) {
-                    "BACK" -> performGlobalAction(GLOBAL_ACTION_BACK)
-                    "HOME" -> performGlobalAction(GLOBAL_ACTION_HOME)
-                    "RECENTS" -> performGlobalAction(GLOBAL_ACTION_RECENTS)
-                    "NOTIFICATIONS" -> performGlobalAction(GLOBAL_ACTION_NOTIFICATIONS)
-                    "LOCK_SCREEN" -> performGlobalAction(GLOBAL_ACTION_LOCK_SCREEN)
+                    "BACK" -> performAgentGlobalAction(GLOBAL_ACTION_BACK)
+                    "HOME" -> performAgentGlobalAction(GLOBAL_ACTION_HOME)
+                    "RECENTS" -> performAgentGlobalAction(GLOBAL_ACTION_RECENTS)
+                    "NOTIFICATIONS" -> performAgentGlobalAction(GLOBAL_ACTION_NOTIFICATIONS)
+                    "LOCK_SCREEN" -> performAgentGlobalAction(GLOBAL_ACTION_LOCK_SCREEN)
                     else -> Log.w(TAG, "Unknown global: ${action.target}")
                 }
             }
@@ -531,7 +512,7 @@ class AgentAccessibilityService : AccessibilityService() {
 
     private fun createBundleForSetText(text: String): android.os.Bundle {
         return android.os.Bundle().apply {
-            putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_KEY, text)
+            putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
         }
     }
 }

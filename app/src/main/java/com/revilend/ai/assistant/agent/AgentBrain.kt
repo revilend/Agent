@@ -139,12 +139,12 @@ class AgentBrain(private val context: Context) {
                     )
                 }
                 "open_app" -> {
-                    val package = action.target ?: action.data as? String ?: ""
-                    val success = deviceController.launchApp(package)
+                    val pkgName = action.target ?: action.data as? String ?: ""
+                    val success = deviceController.launchApp(pkgName)
                     AgentResponse(
                         action = "open_app",
-                        target = package,
-                        message = if (success) "Opened $package" else "Failed to open $package",
+                        target = pkgName,
+                        message = if (success) "Opened $pkgName" else "Failed to open $pkgName",
                         done = !success
                     )
                 }

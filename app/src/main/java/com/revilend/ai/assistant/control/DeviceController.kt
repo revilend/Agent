@@ -104,9 +104,9 @@ class DeviceController(private val context: Context) {
 
     // Audio and Volume control
     fun setMediaVolume(level: Int) {
-        val max = audioManager.getStreamMaxVolume(AudioManager.STREAM_MEDIA)
+        val max = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
         val clamped = level.coerceIn(0, max)
-        audioManager.setStreamVolume(AudioManager.STREAM_MEDIA, clamped, 0)
+        audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, clamped, 0)
         Log.d(TAG, "Media volume set to: $clamped")
     }
 
@@ -124,13 +124,13 @@ class DeviceController(private val context: Context) {
         Log.d(TAG, "Alarm volume set to: $clamped")
     }
 
-    fun getMediaVolume(): Int = audioManager.getStreamVolume(AudioManager.STREAM_MEDIA)
+    fun getMediaVolume(): Int = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
 
     fun getRingVolume(): Int = audioManager.getStreamVolume(AudioManager.STREAM_RING)
 
     fun getAlarmVolume(): Int = audioManager.getStreamVolume(AudioManager.STREAM_ALARM)
 
-    fun getMaxMediaVolume(): Int = audioManager.getStreamMaxVolume(AudioManager.STREAM_MEDIA)
+    fun getMaxMediaVolume(): Int = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
 
     fun getMaxRingVolume(): Int = audioManager.getStreamMaxVolume(AudioManager.STREAM_RING)
 
@@ -171,7 +171,7 @@ class DeviceController(private val context: Context) {
 
     // Battery and Hardware info
     fun getBatteryInfo(): BatteryInfo {
-        val batteryStatus = context.registerReceiver(null, android.content.IntentFilter(android.intent.action.BATTERY_CHANGED))
+        val batteryStatus = context.registerReceiver(null, android.content.IntentFilter(Intent.ACTION_BATTERY_CHANGED))
         val level = batteryStatus?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
         val scale = batteryStatus?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1
         val isCharging = batteryStatus?.getIntExtra(BatteryManager.EXTRA_STATUS, -1) == BatteryManager.BATTERY_STATUS_CHARGING ||
@@ -368,7 +368,7 @@ class DeviceController(private val context: Context) {
         if (launchApp(query)) return true
 
         // Open in Play Store
-        try {
+        return try {
             val intent = Intent(Intent.ACTION_VIEW)
             intent.data = android.net.Uri.parse("market://search?q=${query}")
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
@@ -433,7 +433,8 @@ class DeviceController(private val context: Context) {
 
     fun openNotifications() {
         try {
-            val intent = Intent(Settings.ACTION_NOTIFICATION_LIST_SETTINGS)
+            val intent = Intent("android.settings.APP_NOTIFICATION_SETTINGS")
+            intent.putExtra("app_package", context.packageName)
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             ContextCompat.startActivity(context, intent, null)
             Log.d(TAG, "Opened notifications settings")
@@ -536,7 +537,7 @@ class DeviceController(private val context: Context) {
             }
             "LOCK_SCREEN" -> {
                 try {
-                    val lockIntent = Intent(Settings.ACTION_LOCK_SCREEN)
+                    val lockIntent = Intent(Settings.ACTION_SECURITY_SETTINGS)
                     lockIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                     ContextCompat.startActivity(context, lockIntent, null)
                     CommandResult(success = true, message = "Lock screen")

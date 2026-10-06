@@ -36,11 +36,11 @@ import android.view.SurfaceHolder
 import android.view.TextureView
 import android.view.View
 import android.view.WindowManager
-import android.view.accessibility.AccessibilityService
 import android.widget.FrameLayout
 import android.widget.TextView
 import androidx.core.app.NotificationCompat
 import com.revilend.ai.assistant.R
+import com.revilend.ai.assistant.ui.MainActivity
 import com.revilend.ai.assistant.util.PreferencesManager
 import kotlin.math.abs
 import kotlin.math.cos
@@ -152,7 +152,14 @@ class FloatingHudService : Service() {
 
     override fun onDestroy() {
         super.onDestroy()
-        removeFloatingView()
+        binding?.let { view ->
+            try {
+                windowManager?.removeView(view)
+            } catch (e: Exception) {
+                Log.e(TAG, "Remove view error: ${e.message}")
+            }
+        }
+        binding = null
         Log.d(TAG, "FloatingHudService destroyed")
     }
 
@@ -210,7 +217,6 @@ class FloatingHudService : Service() {
     private fun setupFloatingView() {
         binding = FloatingHudLayout(this).apply {
             layoutParams = windowParams!!
-            isHudDocked = preferencesManager.isHudDocked
             updatePositionFromPrefs()
         }
 
@@ -226,8 +232,8 @@ class FloatingHudService : Service() {
     private fun handleTouch(event: MotionEvent): Boolean {
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
-                initialX = windowParams?.x ?: 0f
-                initialY = windowParams?.y ?: 0f
+                initialX = (windowParams?.x ?: 0).toFloat()
+                initialY = (windowParams?.y ?: 0).toFloat()
                 initialTouchX = event.rawX
                 initialTouchY = event.rawY
                 isDragging = false
@@ -465,7 +471,7 @@ class FloatingHudLayout @JvmOverloads constructor(
 
     private fun drawIdleState(canvas: Canvas, cx: Float, cy: Float) {
         // Breathing glow effect
-        val pulse = (sin(elapsedTime * 0.003) * 0.3 + 0.7)
+        val pulse = (sin(elapsedTime * 0.003) * 0.3 + 0.7).toFloat()
         glowRadius = 100 * pulse
 
         // Glow
@@ -474,13 +480,13 @@ class FloatingHudLayout @JvmOverloads constructor(
         })
 
         // Main circle
-        canvas.drawCircle(cx, cy, 72, mainPaint.apply {
+        canvas.drawCircle(cx, cy, 72f, mainPaint.apply {
             setColor(Color.parseColor("#0D1117"))
             setShadowLayer(0f, 0f, 0f, Color.TRANSPARENT)
         })
 
         // Border
-        canvas.drawCircle(cx, cy, 72, soundwavePaint.apply {
+        canvas.drawCircle(cx, cy, 72f, soundwavePaint.apply {
             setColor(Color.parseColor("#00E5FF"))
             alpha = 100
         })
@@ -498,7 +504,7 @@ class FloatingHudLayout @JvmOverloads constructor(
         val time = elapsedTime * 0.003
 
         // Pulsing soundwave animation
-        val soundwaveRadius = 60f + (abs(sin(time * 4)) * 20)
+        val soundwaveRadius = (60f + (abs(sin(time * 4)) * 20)).toFloat()
 
         // Outer glow
         canvas.drawCircle(cx, cy, soundwaveRadius + 40, glowPaint.apply {
@@ -507,7 +513,7 @@ class FloatingHudLayout @JvmOverloads constructor(
 
         // Soundwave circles
         for (i in 1..3) {
-            val radius = 30f + i * 20 + abs(sin(time * 4 + i)) * 15
+            val radius = (30f + i * 20 + abs(sin(time * 4 + i)) * 15).toFloat()
             canvas.drawCircle(cx, cy, radius, soundwavePaint.apply {
                 alpha = (150 - i * 40).toInt()
                 strokeWidth = 3f - i * 0.5f
@@ -515,7 +521,7 @@ class FloatingHudLayout @JvmOverloads constructor(
         }
 
         // Main circle background
-        canvas.drawCircle(cx, cy, 72, mainPaint.apply {
+        canvas.drawCircle(cx, cy, 72f, mainPaint.apply {
             setColor(Color.parseColor("#0D1117"))
         })
 
@@ -530,7 +536,7 @@ class FloatingHudLayout @JvmOverloads constructor(
         }
 
         // Simplified mic icon
-        canvas.drawCircle(cx, cy, 15, micPaint)
+        canvas.drawCircle(cx, cy, 15f, micPaint)
         canvas.drawRect(cx - 3, cy - 25, cx + 3, cy + 5, micPaint.apply {
             setColor(Color.parseColor("#00E5FF"))
         })
@@ -549,19 +555,19 @@ class FloatingHudLayout @JvmOverloads constructor(
         val rotation = (time * 360) % 360
 
         // Glow
-        canvas.drawCircle(cx, cy, 110, glowPaint.apply {
+        canvas.drawCircle(cx, cy, 110f, glowPaint.apply {
             alpha = 100
         })
 
         // Main circle
-        canvas.drawCircle(cx, cy, 72, mainPaint.apply {
+        canvas.drawCircle(cx, cy, 72f, mainPaint.apply {
             setColor(Color.parseColor("#0D1117"))
         })
 
         // Rotating spinner
         canvas.save()
-        canvas.rotate(rotation, cx, cy)
-        canvas.drawCircle(cx, cy, 50, spinnerPaint.apply {
+        canvas.rotate(rotation.toFloat(), cx, cy)
+        canvas.drawCircle(cx, cy, 50f, spinnerPaint.apply {
             setColor(Color.parseColor("#00E5FF"))
             alpha = 200
         })
@@ -595,17 +601,17 @@ class FloatingHudLayout @JvmOverloads constructor(
 
         // Pulsing action glow
         val pulse = (sin(time * 6) * 0.3 + 0.7)
-        canvas.drawCircle(cx, cy, 90 * pulse, glowPaint.apply {
+        canvas.drawCircle(cx, cy, (90 * pulse).toFloat(), glowPaint.apply {
             alpha = (150 * pulse).toInt()
         })
 
         // Main circle
-        canvas.drawCircle(cx, cy, 72, mainPaint.apply {
+        canvas.drawCircle(cx, cy, 72f, mainPaint.apply {
             setColor(Color.parseColor("#0D1117"))
         })
 
         // Border pulse
-        canvas.drawCircle(cx, cy, 72, soundwavePaint.apply {
+        canvas.drawCircle(cx, cy, 72f, soundwavePaint.apply {
             setColor(Color.parseColor("#00E5FF"))
             alpha = (100 + abs(sin(time * 6)) * 100).toInt()
         })

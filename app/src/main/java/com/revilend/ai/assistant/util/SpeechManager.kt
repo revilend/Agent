@@ -6,6 +6,7 @@ import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
 import android.util.Log
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -24,13 +25,13 @@ class SpeechManager(private val context: Context) {
     private var isListening = false
     private var isInitialized = false
 
-    private val _speechState = MutableStateFlow(SpeechState.Idle)
+    private val _speechState = MutableStateFlow<SpeechState>(SpeechState.Idle)
     val speechState: StateFlow<SpeechState> = _speechState.asStateFlow()
 
     private val _speechResult = MutableStateFlow<String?>(null)
     val speechResult: StateFlow<String?> = _speechResult.asStateFlow()
 
-    private val _ttsState = MutableStateFlow(TtsState.Idle)
+    private val _ttsState = MutableStateFlow<TtsState>(TtsState.Idle)
     val ttsState: StateFlow<TtsState> = _ttsState.asStateFlow()
 
     var voiceLanguage: String
@@ -214,7 +215,6 @@ class SpeechManager(private val context: Context) {
             SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "Insufficient permissions"
             SpeechRecognizer.ERROR_NETWORK -> "Network error"
             SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "Network timeout"
-            SpeechRecognizer.ERROR_NO_NETWORK -> "No network"
             SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "Recognizer busy"
             SpeechRecognizer.ERROR_SERVER -> "Server error"
             SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "Speech timeout"
@@ -245,7 +245,7 @@ class SpeechManager(private val context: Context) {
         onDone: () -> Unit = {},
         onError: (String) -> Unit = {}
     ) {
-        tts?.setOnUtteranceProgressListener(object : TextToSpeech.OnUtteranceProgressListener() {
+        tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
             override fun onStart(utteranceId: String?) {
                 onStart()
             }

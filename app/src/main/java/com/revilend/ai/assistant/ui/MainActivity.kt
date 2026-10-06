@@ -4,6 +4,7 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
 import android.provider.Settings
+import android.util.Log
 import android.view.View
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
@@ -54,10 +55,7 @@ class MainActivity : AppCompatActivity() {
         binding.btnOverlay.setOnClickListener {
             openOverlaySettings()
         }
-        binding.btnMicrophone.setOnClickListener {
-            openAppSettings()
-        }
-        binding.btnPhoneSms.setOnClickListener {
+        binding.btnMicsms.setOnClickListener {
             openAppSettings()
         }
         binding.btnCamera.setOnClickListener {
@@ -108,7 +106,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun isAccessibilityEnabled(): Boolean {
-        val am = getSystemService(android.accessibilityservice.AccessibilityService::class.java)
+        val am = getSystemService(android.view.accessibility.AccessibilityManager::class.java)
         return am.isEnabled && am.isTouchExplorationEnabled
     }
 
@@ -170,7 +168,9 @@ class MainActivity : AppCompatActivity() {
 
     private fun openNotificationsSettings() {
         try {
-            startActivity(Intent(Settings.ACTION_NOTIFICATION_LIST_SETTINGS))
+            startActivity(Intent("android.settings.APP_NOTIFICATION_SETTINGS").apply {
+                putExtra("app_package", packageName)
+            })
         } catch (e: Exception) {
             Toast.makeText(this, "Notification settings not available", Toast.LENGTH_SHORT).show()
         }

@@ -25,6 +25,7 @@ class PreferencesManager(context: Context) {
         private const val KEY_HUD_POSITION_X = "hud_position_x"
         private const val KEY_HUD_POSITION_Y = "hud_position_y"
         private const val KEY_HUD_DOCKED = "hud_docked"
+        private const val KEY_VOICE_FEEDBACK = "voice_feedback"
     }
 
     var groqApiKey: String
@@ -91,6 +92,12 @@ class PreferencesManager(context: Context) {
         get() = prefs.getBoolean(KEY_IS_HUD_VISIBLE, true)
         set(value) {
             prefs.edit().putBoolean(KEY_IS_HUD_VISIBLE, value).apply()
+        }
+
+    var isVoiceFeedbackEnabled: Boolean
+        get() = prefs.getBoolean(KEY_VOICE_FEEDBACK, true)
+        set(value) {
+            prefs.edit().putBoolean(KEY_VOICE_FEEDBACK, value).apply()
         }
 
     fun reset() {
