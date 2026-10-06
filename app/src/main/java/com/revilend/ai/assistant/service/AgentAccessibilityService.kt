@@ -87,8 +87,8 @@ class AgentAccessibilityService : AccessibilityService() {
 
         when (event.eventType) {
             AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> {
-                currentPackageName = event.packageName ?: ""
-                currentClassName = event.className ?: ""
+                currentPackageName = event.packageName?.toString() ?: ""
+                currentClassName = event.className?.toString() ?: ""
                 Log.d(TAG, "Window changed: $currentPackageName / $currentClassName")
                 updateRootNode()
             }
