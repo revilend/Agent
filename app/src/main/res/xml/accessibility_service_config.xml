@@ -2,8 +2,7 @@
 <accessibility-service
     xmlns:android="http://schemas.android.com/apk/res/android"
     android:description="@string/access_description"
-    android:service="com.jasur.voiceassistant.service.RevilendAccessibilityService"
-    android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged|typeViewClicked|typeViewSelected|typeViewTextChanged|typeViewReachedAccessibilityFocus"
+    android:accessibilityEventTypes="typeWindowStateChanged|typeViewClicked|typeViewFocused|typeViewTextChanged|typeWindowContentChanged"
     android:accessibilityFlags="flagIncludeNotImportantViews|flagRetrieveInteractiveWindows"
     android:canRetrieveWindowContent="true"
     android:notificationTimeout="100"
