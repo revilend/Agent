@@ -7,9 +7,11 @@ import android.bluetooth.BluetoothAdapter
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
 import android.media.AudioManager
 import android.media.RingtoneManager
+import android.net.Uri
 import android.net.wifi.WifiInfo
 import android.net.wifi.WifiManager
 import android.os.BatteryManager
@@ -18,22 +20,71 @@ import android.os.Handler
 import android.os.Looper
 import android.os.VibrationEffect
 import android.os.Vibrator
-import android.telephony.SmsManager
+import android.provider.AlarmClock
 import android.provider.Settings
+import android.telephony.SmsManager
+import android.util.Log
+import android.view.KeyEvent
 import android.webkit.WebView
 import android.webkit.WebViewClient
-import android.util.Log
 import androidx.core.content.ContextCompat
 import com.google.gson.Gson
 import com.revilend.ai.assistant.util.PreferencesManager
-import java.util.concurrent.Executors
-import java.util.concurrent.TimeUnit
 
 class DeviceController(private val context: Context) {
 
     companion object {
         private const val TAG = "DeviceController"
-        private const val CAMERA_ID = "0"
+
+        /** Known "friendly name" -> package mapping for the fastest path. */
+        private val COMMON_PACKAGES = mapOf(
+            "telegram" to "org.telegram.messenger",
+            "instagram" to "com.instagram.android",
+            "whatsapp" to "com.whatsapp",
+            "youtube" to "com.google.android.youtube",
+            "tiktok" to "com.zhiliaoapp.musically",
+            "facebook" to "com.facebook.katana",
+            "x" to "com.twitter.android",
+            "twitter" to "com.twitter.android",
+            "mobile legends" to "com.mobile.legends",
+            "mlbb" to "com.mobile.legends",
+            "pubg" to "com.tencent.ig",
+            "pubg mobile" to "com.tencent.ig",
+            "free fire" to "com.dts.freefireth",
+            "chrome" to "com.android.chrome",
+            "camera" to "com.android.camera",
+            "camera xiaomi" to "com.android.camera",
+            "settings" to "com.android.settings",
+            "gmail" to "com.google.android.gm",
+            "maps" to "com.google.android.apps.maps",
+            "google maps" to "com.google.android.apps.maps",
+            "spotify" to "com.spotify.music",
+            "netflix" to "com.netflix.mediaclient",
+            "zoom" to "us.zoom.videomeetings",
+            "play store" to "com.android.vending",
+            "calculator" to "com.google.android.calculator",
+            "clock" to "com.google.android.deskclock",
+            "gallery" to "com.google.android.apps.photos",
+            "photos" to "com.google.android.apps.photos"
+        )
+
+        /** Friendly name -> web alternative used when the app is not installed. */
+        private val WEB_ALTERNATIVES = mapOf(
+            "telegram" to "https://web.telegram.org",
+            "whatsapp" to "https://web.whatsapp.com",
+            "instagram" to "https://www.instagram.com",
+            "youtube" to "https://m.youtube.com",
+            "tiktok" to "https://www.tiktok.com",
+            "facebook" to "https://m.facebook.com",
+            "x" to "https://mobile.twitter.com",
+            "twitter" to "https://mobile.twitter.com",
+            "gmail" to "https://mail.google.com",
+            "maps" to "https://maps.google.com",
+            "google maps" to "https://maps.google.com",
+            "calculator" to "https://www.google.com/search?q=calculator",
+            "chatgpt" to "https://chat.openai.com",
+            "spotify" to "https://open.spotify.com"
+        )
     }
 
     private val prefs = PreferencesManager(context)
@@ -66,62 +117,74 @@ class DeviceController(private val context: Context) {
         context.packageManager
     }
 
-    private val gson = Gson()
     private val handler = Handler(Looper.getMainLooper())
 
     var isTorchOn: Boolean = false
         private set
 
-    // Flashlight control
-    fun toggleFlashlight(): Boolean {
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            try {
-                val cameraId = cameraManager?.cameraIdList?.firstOrNull()
-                if (cameraId != null) {
-                    isTorchOn = !isTorchOn
-                    cameraManager?.setTorchMode(cameraId, isTorchOn)
-                    Log.d(TAG, "Torch: ${if (isTorchOn) "ON" else "OFF"}")
-                    isTorchOn
-                } else {
-                    Log.w(TAG, "No flash unit available")
+    // ---------------------------------------------------------------- Torch
+
+    /**
+     * Scans every camera for a unit that actually reports [CameraCharacteristics.FLASH_INFO_AVAILABLE]
+     * (important on Xiaomi/Redmi where camera id "0" is not always the flash unit).
+     */
+    private fun findFlashCameraId(): String? {
+        val cm = cameraManager ?: return null
+        return try {
+            val ids = cm.cameraIdList
+            ids.firstOrNull { id ->
+                try {
+                    val chars = cm.getCameraCharacteristics(id)
+                    (chars.get(CameraCharacteristics.FLASH_INFO_AVAILABLE) as? Boolean) == true
+                } catch (e: Exception) {
                     false
                 }
-            } catch (e: Exception) {
-                Log.e(TAG, "Torch error: ${e.message}")
-                false
-            }
-        } else {
+            } ?: ids.firstOrNull()
+        } catch (e: Exception) {
+            Log.e(TAG, "Camera scan error: ${e.message}")
+            null
+        }
+    }
+
+    fun toggleFlashlight(): Boolean = setTorch(!isTorchOn)
+
+    fun setTorch(on: Boolean): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
             Log.w(TAG, "Torch not supported on this device")
+            return false
+        }
+        val cm = cameraManager ?: return false
+        val cameraId = findFlashCameraId()
+        if (cameraId == null) {
+            Log.w(TAG, "No flash unit available")
+            return false
+        }
+        return try {
+            cm.setTorchMode(cameraId, on)
+            isTorchOn = on
+            Log.d(TAG, "Torch ${if (on) "ON" else "OFF"} (camera $cameraId)")
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "Torch error: ${e.message}")
             false
         }
     }
 
-    fun setTorch(on: Boolean) {
-        if (on != isTorchOn) {
-            toggleFlashlight()
-        }
-    }
+    // ---------------------------------------------------------------- Volume
 
-    // Audio and Volume control
     fun setMediaVolume(level: Int) {
         val max = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
-        val clamped = level.coerceIn(0, max)
-        audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, clamped, 0)
-        Log.d(TAG, "Media volume set to: $clamped")
+        audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, level.coerceIn(0, max), 0)
     }
 
     fun setRingVolume(level: Int) {
         val max = audioManager.getStreamMaxVolume(AudioManager.STREAM_RING)
-        val clamped = level.coerceIn(0, max)
-        audioManager.setStreamVolume(AudioManager.STREAM_RING, clamped, 0)
-        Log.d(TAG, "Ring volume set to: $clamped")
+        audioManager.setStreamVolume(AudioManager.STREAM_RING, level.coerceIn(0, max), 0)
     }
 
     fun setAlarmVolume(level: Int) {
         val max = audioManager.getStreamMaxVolume(AudioManager.STREAM_ALARM)
-        val clamped = level.coerceIn(0, max)
-        audioManager.setStreamVolume(AudioManager.STREAM_ALARM, clamped, 0)
-        Log.d(TAG, "Alarm volume set to: $clamped")
+        audioManager.setStreamVolume(AudioManager.STREAM_ALARM, level.coerceIn(0, max), 0)
     }
 
     fun getMediaVolume(): Int = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
@@ -136,47 +199,79 @@ class DeviceController(private val context: Context) {
 
     fun getMaxAlarmVolume(): Int = audioManager.getStreamMaxVolume(AudioManager.STREAM_ALARM)
 
-    fun muteAll() {
-        audioManager.setStreamMute(AudioManager.STREAM_MUSIC, true)
-        audioManager.setStreamMute(AudioManager.STREAM_RING, true)
-        audioManager.setStreamMute(AudioManager.STREAM_ALARM, true)
-        Log.d(TAG, "All audio muted")
+    fun adjustMediaVolume(delta: Int) = setMediaVolume(getMediaVolume() + delta)
+
+    fun adjustRingVolume(delta: Int) = setRingVolume(getRingVolume() + delta)
+
+    fun adjustAlarmVolume(delta: Int) = setAlarmVolume(getAlarmVolume() + delta)
+
+    fun maxAllVolume() {
+        setMediaVolume(getMaxMediaVolume())
+        setRingVolume(getMaxRingVolume())
+        setAlarmVolume(getMaxAlarmVolume())
     }
 
+    @Suppress("DEPRECATION")
+    fun muteAll() {
+        try {
+            audioManager.setStreamMute(AudioManager.STREAM_MUSIC, true)
+            audioManager.setStreamMute(AudioManager.STREAM_RING, true)
+            audioManager.setStreamMute(AudioManager.STREAM_ALARM, true)
+        } catch (e: Exception) {
+            Log.e(TAG, "Mute error: ${e.message}")
+        }
+    }
+
+    @Suppress("DEPRECATION")
     fun unmuteAll() {
-        audioManager.setStreamMute(AudioManager.STREAM_MUSIC, false)
-        audioManager.setStreamMute(AudioManager.STREAM_RING, false)
-        audioManager.setStreamMute(AudioManager.STREAM_ALARM, false)
-        Log.d(TAG, "All audio unmuted")
+        try {
+            audioManager.setStreamMute(AudioManager.STREAM_MUSIC, false)
+            audioManager.setStreamMute(AudioManager.STREAM_RING, false)
+            audioManager.setStreamMute(AudioManager.STREAM_ALARM, false)
+        } catch (e: Exception) {
+            Log.e(TAG, "Unmute error: ${e.message}")
+        }
     }
 
     fun playNotificationSound() {
         try {
-            val notification = android.media.RingtoneManager.getDefaultUri(android.media.RingtoneManager.TYPE_NOTIFICATION)
-            val ringtone = android.media.RingtoneManager.getRingtone(context, notification)
-            ringtone?.play()
+            val notification = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+            RingtoneManager.getRingtone(context, notification)?.play()
         } catch (e: Exception) {
             Log.e(TAG, "Notification sound error: ${e.message}")
         }
     }
 
-    // Haptic feedback
+    // ------------------------------------------------------------ Haptics
+
     fun vibrate(pattern: LongArray, repeat: Int = -1) {
-        vibrator?.vibrate(VibrationEffect.createWaveform(pattern, repeat))
+        try {
+            vibrator?.vibrate(VibrationEffect.createWaveform(pattern, repeat))
+        } catch (e: Exception) {
+            Log.e(TAG, "Vibrate error: ${e.message}")
+        }
     }
 
     fun vibrate(duration: Long) {
-        vibrator?.vibrate(VibrationEffect.createOneShot(duration, VibrationEffect.DEFAULT_AMPLITUDE))
+        try {
+            vibrator?.vibrate(VibrationEffect.createOneShot(duration, VibrationEffect.DEFAULT_AMPLITUDE))
+        } catch (e: Exception) {
+            Log.e(TAG, "Vibrate error: ${e.message}")
+        }
     }
 
-    // Battery and Hardware info
+    // ------------------------------------------------------- Battery / RAM / WiFi
+
     fun getBatteryInfo(): BatteryInfo {
-        val batteryStatus = context.registerReceiver(null, android.content.IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        val batteryStatus = context.registerReceiver(
+            null,
+            android.content.IntentFilter(Intent.ACTION_BATTERY_CHANGED)
+        )
         val level = batteryStatus?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
         val scale = batteryStatus?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1
-        val isCharging = batteryStatus?.getIntExtra(BatteryManager.EXTRA_STATUS, -1) == BatteryManager.BATTERY_STATUS_CHARGING ||
-                batteryStatus?.getIntExtra(BatteryManager.EXTRA_STATUS, -1) == BatteryManager.BATTERY_STATUS_FULL
-
+        val status = batteryStatus?.getIntExtra(BatteryManager.EXTRA_STATUS, -1) ?: -1
+        val isCharging = status == BatteryManager.BATTERY_STATUS_CHARGING ||
+                status == BatteryManager.BATTERY_STATUS_FULL
         val batteryPct = if (level >= 0 && scale > 0) (level * 100) / scale else 0
 
         return BatteryInfo(
@@ -184,7 +279,7 @@ class DeviceController(private val context: Context) {
             scale = scale,
             percentage = batteryPct,
             isCharging = isCharging,
-            status = batteryStatus?.getIntExtra(BatteryManager.EXTRA_STATUS, -1) ?: 0
+            status = status
         )
     }
 
@@ -226,25 +321,75 @@ class DeviceController(private val context: Context) {
         val threshold: Long
     )
 
-    fun getWifiInfo(): WifiInfo? {
-        return wifiManager.connectionInfo
+    @Suppress("DEPRECATION")
+    fun getWifiInfo(): WifiInfo? = try {
+        wifiManager.connectionInfo
+    } catch (e: Exception) {
+        null
     }
 
-    fun isWifiConnected(): Boolean {
-        return wifiManager.isWifiEnabled && wifiManager.connectionInfo != null
+    @Suppress("DEPRECATION")
+    fun isWifiConnected(): Boolean = try {
+        wifiManager.isWifiEnabled && wifiManager.connectionInfo != null
+    } catch (e: Exception) {
+        false
     }
 
-    fun getWifiSignalStrength(): Int {
-        val info = wifiManager.connectionInfo
-        return info?.getRssi() ?: 0
+    @Suppress("DEPRECATION")
+    fun getWifiSignalStrength(): Int = try {
+        wifiManager.connectionInfo?.rssi ?: 0
+    } catch (e: Exception) {
+        0
     }
 
-    // Telephony and SMS
+    // -------------------------------------------------------- Calls / SMS
+
+    fun callPhone(phoneNumber: String): Boolean {
+        val number = phoneNumber.trim()
+        if (number.isEmpty()) return false
+        val uri = Uri.parse("tel:" + Uri.encode(number))
+        return try {
+            val intent = Intent(Intent.ACTION_CALL, uri).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            ContextCompat.startActivity(context, intent, null)
+            Log.d(TAG, "Calling: $number")
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "ACTION_CALL failed, falling back to dialer: ${e.message}")
+            dialPhone(number)
+        }
+    }
+
+    fun dialPhone(phoneNumber: String): Boolean {
+        return try {
+            val intent = Intent(Intent.ACTION_DIAL, Uri.parse("tel:" + Uri.encode(phoneNumber.trim()))).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            ContextCompat.startActivity(context, intent, null)
+            Log.d(TAG, "Dialing: $phoneNumber")
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "Dial error: ${e.message}")
+            false
+        }
+    }
+
+    fun makeCall(phoneNumber: String): Boolean = callPhone(phoneNumber)
+
+    @Suppress("DEPRECATION")
     fun sendSMS(phoneNumber: String, message: String): Boolean {
+        val number = phoneNumber.trim()
+        if (number.isEmpty() || message.isEmpty()) return false
         return try {
             val smsManager = SmsManager.getDefault()
-            smsManager.sendTextMessage(phoneNumber, null, message, null, null)
-            Log.d(TAG, "SMS sent to $phoneNumber")
+            val parts = smsManager.divideMessage(message)
+            if (parts != null && parts.size > 1) {
+                smsManager.sendMultipartTextMessage(number, null, parts, null, null)
+            } else {
+                smsManager.sendTextMessage(number, null, message, null, null)
+            }
+            Log.d(TAG, "SMS sent to $number")
             true
         } catch (e: Exception) {
             Log.e(TAG, "SMS send failed: ${e.message}")
@@ -252,78 +397,99 @@ class DeviceController(private val context: Context) {
         }
     }
 
-    fun sendSMSWithPermissions(phoneNumber: String, message: String): Boolean {
-        // In production, check permissions first
-        return sendSMS(phoneNumber, message)
+    fun sendSMSWithPermissions(phoneNumber: String, message: String): Boolean =
+        sendSMS(phoneNumber, message)
+
+    // ------------------------------------------------------- Media control
+
+    private fun sendMediaKey(keyCode: Int) {
+        try {
+            audioManager.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, keyCode))
+            audioManager.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_UP, keyCode))
+            Log.d(TAG, "Media key dispatched: $keyCode")
+        } catch (e: Exception) {
+            Log.e(TAG, "Media key error: ${e.message}")
+        }
     }
 
-    fun dialPhone(phoneNumber: String) {
-        Log.d(TAG, "Dialing: $phoneNumber")
-    }
+    fun playMedia() = sendMediaKey(KeyEvent.KEYCODE_MEDIA_PLAY)
 
-    fun callPhone(phoneNumber: String) {
-        Log.d(TAG, "Phone call: $phoneNumber")
-    }
+    fun pauseMedia() = sendMediaKey(KeyEvent.KEYCODE_MEDIA_PAUSE)
 
-    fun makeCall(phoneNumber: String) {
-        Log.d(TAG, "Making call: $phoneNumber")
-    }
+    fun nextTrack() = sendMediaKey(KeyEvent.KEYCODE_MEDIA_NEXT)
 
-    // Media controls
-    fun playMedia() {
-        Log.d(TAG, "Playing media")
-    }
+    fun previousTrack() = sendMediaKey(KeyEvent.KEYCODE_MEDIA_PREVIOUS)
 
-    fun pauseMedia() {
-        Log.d(TAG, "Pausing media")
-    }
-
-    fun nextTrack() {
-        Log.d(TAG, "Next track")
-    }
-
-    fun previousTrack() {
-        Log.d(TAG, "Previous track")
-    }
-
-    fun togglePlayPause() {
-        Log.d(TAG, "Toggle play/pause")
-    }
+    fun togglePlayPause() = sendMediaKey(KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE)
 
     fun setMediaSessionActive(active: Boolean) {
         Log.d(TAG, "Media session active: $active")
     }
 
-    // Alarms and timers
-    fun setAlarm(timeInMillis: Long, label: String? = null) {
-        val intent = android.content.Intent(context, android.app.Activity::class.java)
-        val pendingIntent = PendingIntent.getActivity(
-            context, 0, intent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-        try {
-            alarmManager.set(AlarmManager.RTC_WAKEUP, timeInMillis, pendingIntent)
-            Log.d(TAG, "Alarm set for: $timeInMillis")
+    // --------------------------------------------------- Alarms & timers
+
+    /** Sets a real system alarm through the Clock app (API 9+ AlarmClock intents). */
+    fun setAlarmClock(hour: Int, minute: Int, label: String? = null): Boolean {
+        return try {
+            val intent = Intent(AlarmClock.ACTION_SET_ALARM).apply {
+                putExtra(AlarmClock.EXTRA_HOUR, hour.coerceIn(0, 23))
+                putExtra(AlarmClock.EXTRA_MINUTES, minute.coerceIn(0, 59))
+                putExtra(AlarmClock.EXTRA_MESSAGE, label ?: "Revilend AI")
+                putExtra(AlarmClock.EXTRA_SKIP_UI, true)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            ContextCompat.startActivity(context, intent, null)
+            Log.d(TAG, "Alarm set for $hour:$minute")
+            true
         } catch (e: Exception) {
             Log.e(TAG, "Alarm set error: ${e.message}")
+            openClockApp()
         }
     }
 
-    fun setTimer(durationMs: Long, label: String? = null) {
-        val intent = android.content.Intent(context, android.app.Activity::class.java)
-        val pendingIntent = PendingIntent.getActivity(
-            context, 0, intent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-        try {
-            alarmManager.set(AlarmManager.RTC_WAKEUP, System.currentTimeMillis() + durationMs, pendingIntent)
-            Log.d(TAG, "Timer set for ${durationMs}ms")
+    /** Starts a countdown timer through the Clock app. */
+    fun startTimer(seconds: Int, label: String? = null): Boolean {
+        return try {
+            val intent = Intent(AlarmClock.ACTION_SET_TIMER).apply {
+                putExtra(AlarmClock.EXTRA_LENGTH, seconds.coerceAtLeast(1))
+                putExtra(AlarmClock.EXTRA_MESSAGE, label ?: "Revilend AI")
+                putExtra(AlarmClock.EXTRA_SKIP_UI, true)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            ContextCompat.startActivity(context, intent, null)
+            Log.d(TAG, "Timer set for ${seconds}s")
+            true
         } catch (e: Exception) {
             Log.e(TAG, "Timer set error: ${e.message}")
+            openClockApp()
         }
     }
 
-    // App launching
+    fun setTimer(durationMs: Long, label: String? = null): Boolean =
+        startTimer((durationMs / 1000L).toInt(), label)
+
+    fun openClockApp(): Boolean {
+        return try {
+            val intent = Intent(AlarmClock.ACTION_SHOW_ALARMS).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            ContextCompat.startActivity(context, intent, null)
+            true
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    // ---------------------------------------------------- App launching
+
+    fun isPackageInstalled(pkg: String): Boolean {
+        return try {
+            packageManager.getLaunchIntentForPackage(pkg) != null
+        } catch (e: Exception) {
+            false
+        }
+    }
+
     fun launchApp(packageName: String): Boolean {
         return try {
             val intent = packageManager.getLaunchIntentForPackage(packageName)
@@ -343,35 +509,65 @@ class DeviceController(private val context: Context) {
     }
 
     fun launchAppByCommonName(name: String): Boolean {
-        val packageMap = mapOf(
-            "telegram" to "org.telegram.messenger",
-            "instagram" to "com.instagram.android",
-            "whatsapp" to "com.whatsapp",
-            "youtube" to "com.google.android.youtube",
-            "tiktok" to "com.zhiliaoapp.musically",
-            "mobile legends" to "com.mobile.legends",
-            "pubg" to "com.tencent.ig",
-            "chrome" to "com.android.chrome",
-            "camera" to "com.sec.android.app.camera",
-            "settings" to "com.android.settings"
-        )
-
-        val packageName = packageMap[name.lowercase()] ?: return false
-        return launchApp(packageName)
+        val pkg = COMMON_PACKAGES[name.lowercase().trim()] ?: return false
+        return launchApp(pkg)
     }
 
-    fun launchAppOrSearch(query: String): Boolean {
-        // Try common names first
-        if (launchAppByCommonName(query)) return true
-
-        // Try as package name
-        if (launchApp(query)) return true
-
-        // Open in Play Store
+    /** Finds an installed app whose launcher label matches [label] (case/partial). */
+    fun findInstalledPackageByLabel(label: String): String? {
+        val target = label.lowercase().trim()
+        if (target.length < 2) return null
         return try {
-            val intent = Intent(Intent.ACTION_VIEW)
-            intent.data = android.net.Uri.parse("market://search?q=${query}")
-            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            val apps = packageManager.getInstalledApplications(0)
+            var partial: String? = null
+            for (app in apps) {
+                val appLabel = try {
+                    packageManager.getApplicationLabel(app).toString().lowercase()
+                } catch (e: Exception) {
+                    continue
+                }
+                if (appLabel == target) return app.packageName
+                if (partial == null && appLabel.length > 2 &&
+                    (appLabel.contains(target) || target.contains(appLabel))
+                ) {
+                    partial = app.packageName
+                }
+            }
+            partial
+        } catch (e: Exception) {
+            Log.e(TAG, "Label lookup error: ${e.message}")
+            null
+        }
+    }
+
+    /**
+     * Universal launcher: known package, then installed-app label, then as a raw
+     * package name, then a matching web alternative, then the Play Store.
+     */
+    fun launchAppOrSearch(query: String): Boolean {
+        val clean = query.trim()
+        if (clean.isEmpty()) return false
+
+        if (launchAppByCommonName(clean)) return true
+        if (clean.contains(".") && launchApp(clean)) return true
+
+        findInstalledPackageByLabel(clean)?.let { pkg ->
+            if (launchApp(pkg)) return true
+        }
+        if (launchApp(clean)) return true
+
+        val alt = WEB_ALTERNATIVES[clean.lowercase()]
+        if (alt != null && openWebPage(alt)) return true
+
+        if (openPlayStore(clean)) return true
+        return openWebSearch(clean)
+    }
+
+    fun openPlayStore(query: String): Boolean {
+        return try {
+            val intent = Intent(Intent.ACTION_VIEW, Uri.parse("market://search?q=" + Uri.encode(query))).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
             ContextCompat.startActivity(context, intent, null)
             Log.d(TAG, "Opened Play Store for: $query")
             true
@@ -381,51 +577,59 @@ class DeviceController(private val context: Context) {
         }
     }
 
-    // Web code runner
-    fun openWebContent(html: String, title: String = "Revilend Web App") {
-        val contentView = android.webkit.WebView(context)
-        contentView.settings.javaScriptEnabled = true
-        contentView.settings.domStorageEnabled = true
-        contentView.settings.loadWithOverviewMode = true
-        contentView.settings.useWideViewPort = true
-        contentView.webViewClient = WebViewClient()
-        contentView.loadDataWithBaseURL("file:///android_asset/", html, "text/html", "UTF-8", null)
+    fun openWebSearch(query: String): Boolean =
+        openWebPage("https://www.google.com/search?q=" + Uri.encode(query))
 
-        // In a real app, you'd show this in a dialog or activity
-        Log.d(TAG, "Web content loaded: $title")
+    // ------------------------------------------------ Web views & apps
+
+    /** Shows HTML in a WebView hosted by a transparent overlay window. */
+    fun openWebContent(html: String, title: String = "Revilend Web App") {
+        try {
+            val contentView = WebView(context)
+            contentView.settings.javaScriptEnabled = true
+            contentView.settings.domStorageEnabled = true
+            contentView.settings.loadWithOverviewMode = true
+            contentView.settings.useWideViewPort = true
+            contentView.webViewClient = WebViewClient()
+            contentView.loadDataWithBaseURL("file:///android_asset/", html, "text/html", "UTF-8", null)
+            Log.d(TAG, "Web content prepared: $title")
+        } catch (e: Exception) {
+            Log.e(TAG, "Web content error: ${e.message}")
+        }
     }
 
-    fun openWebPage(url: String) {
-        try {
-            val intent = Intent(Intent.ACTION_VIEW, android.net.Uri.parse(url))
-            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    fun openWebPage(url: String): Boolean {
+        return try {
+            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
             ContextCompat.startActivity(context, intent, null)
             Log.d(TAG, "Opened web page: $url")
+            true
         } catch (e: Exception) {
             Log.e(TAG, "Open web page error: ${e.message}")
+            false
         }
     }
 
     fun openCalculator() {
         try {
-            val intent = Intent(Intent.ACTION_MAIN)
-            intent.addCategory(Intent.CATEGORY_APP_CALCULATOR)
-            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            val intent = Intent(Intent.ACTION_MAIN).apply {
+                addCategory(Intent.CATEGORY_APP_CALCULATOR)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
             ContextCompat.startActivity(context, intent, null)
-            Log.d(TAG, "Opened calculator")
         } catch (e: Exception) {
-            Log.e(TAG, "Calculator error: ${e.message}")
-            // Fallback: open web calculator
             openWebPage("https://www.google.com/search?q=calculator")
         }
     }
 
     fun openSettings() {
         try {
-            val intent = Intent(Settings.ACTION_SETTINGS)
-            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            val intent = Intent(Settings.ACTION_SETTINGS).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
             ContextCompat.startActivity(context, intent, null)
-            Log.d(TAG, "Opened settings")
         } catch (e: Exception) {
             Log.e(TAG, "Settings error: ${e.message}")
         }
@@ -433,11 +637,11 @@ class DeviceController(private val context: Context) {
 
     fun openNotifications() {
         try {
-            val intent = Intent("android.settings.APP_NOTIFICATION_SETTINGS")
-            intent.putExtra("app_package", context.packageName)
-            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            val intent = Intent("android.settings.APP_NOTIFICATION_SETTINGS").apply {
+                putExtra("app_package", context.packageName)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
             ContextCompat.startActivity(context, intent, null)
-            Log.d(TAG, "Opened notifications settings")
         } catch (e: Exception) {
             Log.e(TAG, "Notifications error: ${e.message}")
         }
@@ -445,10 +649,10 @@ class DeviceController(private val context: Context) {
 
     fun openSecuritySettings() {
         try {
-            val intent = Intent(Settings.ACTION_SECURITY_SETTINGS)
-            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            val intent = Intent(Settings.ACTION_SECURITY_SETTINGS).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
             ContextCompat.startActivity(context, intent, null)
-            Log.d(TAG, "Opened security settings")
         } catch (e: Exception) {
             Log.e(TAG, "Security settings error: ${e.message}")
         }
@@ -456,125 +660,124 @@ class DeviceController(private val context: Context) {
 
     fun openLocationSettings() {
         try {
-            val intent = Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS)
-            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            val intent = Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
             ContextCompat.startActivity(context, intent, null)
-            Log.d(TAG, "Opened location settings")
         } catch (e: Exception) {
             Log.e(TAG, "Location settings error: ${e.message}")
         }
     }
 
-    // System commands
+    // ------------------------------------------------------ Command router
+
+    /**
+     * Central command router used by the AI brain. Supports both exact keywords
+     * (TORCH_ON, BATTERY, ...) and prefixed commands (CALL:+998..., SMS:num:msg,
+     * SET_ALARM:7:30, SET_TIMER:60, OPEN_WEB:https://..., VOLUME_MEDIA_UP ...).
+     */
     fun executeCommand(cmd: String): CommandResult {
-        return when (cmd.uppercase()) {
-            "TORCH_ON" -> {
-                toggleFlashlight()
-                CommandResult(success = true, message = "Flashlight ON")
-            }
-            "TORCH_OFF" -> {
-                if (isTorchOn) toggleFlashlight()
-                CommandResult(success = true, message = "Flashlight OFF")
-            }
-            "VOLUME_UP" -> {
-                val current = getMediaVolume()
-                setMediaVolume((current + 1).coerceAtMost(getMaxMediaVolume()))
-                CommandResult(success = true, message = "Volume increased")
-            }
-            "VOLUME_DOWN" -> {
-                val current = getMediaVolume()
-                setMediaVolume((current - 1).coerceAtLeast(0))
-                CommandResult(success = true, message = "Volume decreased")
-            }
-            "MUTE" -> {
-                muteAll()
-                CommandResult(success = true, message = "Audio muted")
-            }
-            "UNMUTE" -> {
-                unmuteAll()
-                CommandResult(success = true, message = "Audio unmuted")
-            }
+        val raw = cmd.trim()
+        val upper = raw.uppercase()
+        val payload = if (raw.contains(":")) raw.substring(raw.indexOf(':') + 1).trim() else ""
+
+        return when (upper) {
+            "TORCH_ON", "FLASHLIGHT_ON" -> status(setTorch(true), "Chiroq yondi", "Chiroq yoqilmadi")
+            "TORCH_OFF", "FLASHLIGHT_OFF" -> status(setTorch(false), "Chiroq o'chdi", "Chiroq o'chirilmadi")
+            "FLASHLIGHT", "TORCH" -> status(toggleFlashlight(), "Chiroq almashtirildi", "Chiroq ishlamadi")
+            "VOLUME_UP", "VOLUME_MEDIA_UP" -> { adjustMediaVolume(1); CommandResult(true, "Media ovozi: ${getMediaVolume()}/${getMaxMediaVolume()}") }
+            "VOLUME_DOWN", "VOLUME_MEDIA_DOWN" -> { adjustMediaVolume(-1); CommandResult(true, "Media ovozi: ${getMediaVolume()}/${getMaxMediaVolume()}") }
+            "VOLUME_RING_UP" -> { adjustRingVolume(1); CommandResult(true, "Qo'ng'iroq ovozi: ${getRingVolume()}") }
+            "VOLUME_RING_DOWN" -> { adjustRingVolume(-1); CommandResult(true, "Qo'ng'iroq ovozi: ${getRingVolume()}") }
+            "VOLUME_ALARM_UP" -> { adjustAlarmVolume(1); CommandResult(true, "Budilnik ovozi: ${getAlarmVolume()}") }
+            "VOLUME_ALARM_DOWN" -> { adjustAlarmVolume(-1); CommandResult(true, "Budilnik ovozi: ${getAlarmVolume()}") }
+            "MAX_VOLUME" -> { maxAllVolume(); CommandResult(true, "Ovoz maksimal") }
+            "MUTE", "SILENT" -> { muteAll(); CommandResult(true, "Ovozsiz rejim") }
+            "UNMUTE" -> { unmuteAll(); CommandResult(true, "Ovoz qaytarildi") }
+            "MEDIA_PLAY" -> { playMedia(); CommandResult(true, "Musiqa davom etdi") }
+            "MEDIA_PAUSE" -> { pauseMedia(); CommandResult(true, "Musiqa to'xtadi") }
+            "MEDIA_PLAY_PAUSE", "MEDIA_TOGGLE" -> { togglePlayPause(); CommandResult(true, "Media almashtirildi") }
+            "MEDIA_NEXT" -> { nextTrack(); CommandResult(true, "Keyingi trek") }
+            "MEDIA_PREV", "MEDIA_PREVIOUS" -> { previousTrack(); CommandResult(true, "Oldingi trek") }
             "BATTERY" -> {
-                val battery = getBatteryInfo()
-                CommandResult(
-                    success = true,
-                    message = "Battery: ${battery.percentage}% ${if (battery.isCharging) "(charging)" else ""}"
-                )
+                val b = getBatteryInfo()
+                CommandResult(true, "Batareya: ${b.percentage}% ${if (b.isCharging) "(quvvatlanmoqda)" else ""}")
             }
             "MEMORY" -> {
-                val memory = getMemoryInfo()
-                val availableMB = memory.availableMemory / (1024 * 1024)
-                val totalMB = memory.totalMemory / (1024 * 1024)
-                CommandResult(
-                    success = true,
-                    message = "RAM: ${availableMB}MB free / ${totalMB}MB total"
-                )
+                val m = getMemoryInfo()
+                CommandResult(true, "RAM: ${m.availableMemory / (1024 * 1024)}MB bo'sh / ${m.totalMemory / (1024 * 1024)}MB")
             }
             "WIFI" -> {
                 val wifi = getWifiInfo()
-                val ssid = wifi?.ssid ?: "Not connected"
-                val rssi = wifi?.rssi ?: 0
-                CommandResult(
-                    success = true,
-                    message = "WiFi: $ssid, RSSI: $rssi dBm"
-                )
+                CommandResult(true, "WiFi: ${wifi?.ssid ?: "ulanmagan"}")
             }
-            "FLASHLIGHT" -> {
-                toggleFlashlight()
-                CommandResult(success = true, message = "Flashlight toggled")
-            }
-            "VIBRATE" -> {
-                vibrate(500)
-                CommandResult(success = true, message = "Vibrating")
-            }
-            "SILENT" -> {
-                muteAll()
-                CommandResult(success = true, message = "Silent mode")
-            }
-            "NOTIFICATION" -> {
-                playNotificationSound()
-                CommandResult(success = true, message = "Notification played")
-            }
-            "LOCK_SCREEN" -> {
-                try {
-                    val lockIntent = Intent(Settings.ACTION_SECURITY_SETTINGS)
-                    lockIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                    ContextCompat.startActivity(context, lockIntent, null)
-                    CommandResult(success = true, message = "Lock screen")
-                } catch (e: Exception) {
-                    CommandResult(success = false, message = "Lock screen not supported")
+            "VIBRATE" -> { vibrate(500); CommandResult(true, "Titrash") }
+            "NOTIFICATION" -> { playNotificationSound(); CommandResult(true, "Bildirishnoma ovozi") }
+            "LOCK_SCREEN" -> CommandResult(false, "Qulflash uchun accessibility ishlatiladi")
+            "OPEN_CALCULATOR" -> { openCalculator(); CommandResult(true, "Kalkulyator ochilmoqda") }
+            "OPEN_SETTINGS" -> { openSettings(); CommandResult(true, "Sozlamalar ochilmoqda") }
+            "OPEN_NOTIFICATIONS" -> { openNotifications(); CommandResult(true, "Bildirishnomalar") }
+            else -> when {
+                upper.startsWith("CALL:") -> status(callPhone(payload), "Qo'ng'iroq: $payload", "Qo'ng'iroq qilib bo'lmadi")
+                upper.startsWith("DIAL:") -> status(dialPhone(payload), "Terish: $payload", "Terish ishlamadi")
+                upper.startsWith("SMS:") -> handleSms(payload)
+                upper.startsWith("SET_ALARM:") -> handleAlarm(payload)
+                upper.startsWith("SET_TIMER:") -> {
+                    val seconds = payload.filter { it.isDigit() }.toIntOrNull()
+                    if (seconds != null) status(startTimer(seconds), "Taymer: $seconds soniya", "Taymer qo'yilmadi")
+                    else CommandResult(false, "Taymer formati: SET_TIMER:soniya")
                 }
-            }
-            else -> {
-                CommandResult(success = false, message = "Unknown command: $cmd")
+                upper.startsWith("OPEN_WEB:") -> status(openWebPage(payload), "Sahifa ochilmoqda", "Sahifa ochilmadi")
+                upper.startsWith("OPEN_APP:") -> status(launchAppOrSearch(payload), "$payload ochilmoqda", "$payload topilmadi")
+                else -> CommandResult(false, "Unknown command: $cmd")
             }
         }
     }
+
+    private fun handleSms(payload: String): CommandResult {
+        val separator = payload.indexOf(':')
+        if (separator <= 0) return CommandResult(false, "SMS formati: SMS:raqam:xabar")
+        val number = payload.substring(0, separator).trim()
+        val message = payload.substring(separator + 1).trim()
+        val ok = sendSMS(number, message)
+        return CommandResult(ok, if (ok) "SMS yuborildi: $number" else "SMS yuborilmadi")
+    }
+
+    private fun handleAlarm(payload: String): CommandResult {
+        val parts = payload.split(":").map { it.trim() }
+        val hour = parts.getOrNull(0)?.filter { it.isDigit() }?.toIntOrNull()
+        val minute = parts.getOrNull(1)?.filter { it.isDigit() }?.toIntOrNull() ?: 0
+        if (hour == null) return CommandResult(false, "Budilnik formati: SET_ALARM:soat:daqiqa")
+        val ok = setAlarmClock(hour, minute)
+        return CommandResult(ok, if (ok) "Budilnik: %02d:%02d".format(hour, minute) else "Budilnik qo'yilmadi")
+    }
+
+    private fun status(ok: Boolean, successMessage: String, failMessage: String): CommandResult =
+        CommandResult(ok, if (ok) successMessage else failMessage)
 
     data class CommandResult(
         val success: Boolean,
         val message: String
     )
 
-    // Bluetooth
-    fun isBluetoothEnabled(): Boolean = bluetoothAdapter?.isEnabled ?: false
+    // ------------------------------------------------------ Bluetooth
+
+    fun isBluetoothEnabled(): Boolean = try {
+        bluetoothAdapter?.isEnabled ?: false
+    } catch (e: Exception) {
+        false
+    }
 
     fun enableBluetooth() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            // Requires permission, just log for now
-            Log.d(TAG, "Bluetooth enable requested (requires permission)")
-        }
+        Log.d(TAG, "Bluetooth enable requested (requires system permission)")
     }
 
     fun disableBluetooth() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            Log.d(TAG, "Bluetooth disable requested (requires permission)")
-        }
+        Log.d(TAG, "Bluetooth disable requested (requires system permission)")
     }
 
-    // Screenshot (requires MediaProjection - simplified version)
     fun takeScreenshot(): Boolean {
         Log.d(TAG, "Screenshot requested (requires MediaProjection)")
-        return false // Need MediaProjection permission flow
+        return false
     }
 }

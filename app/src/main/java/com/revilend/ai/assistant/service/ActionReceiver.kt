@@ -45,11 +45,16 @@ class ActionReceiver : BroadcastReceiver() {
             }
             "com.revilend.ai.assistant.ACTION_VOICE_COMMAND" -> {
                 val command = intent.getStringExtra("command") ?: ""
-                // Forward to accessibility service for processing
-                val serviceIntent = Intent(context, AgentAccessibilityService::class.java).apply {
-                    putExtra("command", command)
+                // Forward to the accessibility service for processing. The service is bound by
+                // the system, so starting it may fail - never let that crash the receiver.
+                try {
+                    val serviceIntent = Intent(context, AgentAccessibilityService::class.java).apply {
+                        putExtra("command", command)
+                    }
+                    context.startService(serviceIntent)
+                } catch (e: Exception) {
+                    android.util.Log.e("ActionReceiver", "Forward command failed: ${e.message}")
                 }
-                context.startService(serviceIntent)
             }
         }
     }

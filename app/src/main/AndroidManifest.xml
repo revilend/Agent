@@ -18,6 +18,14 @@
     <uses-permission android:name="android.permission.RECEIVE_SMS" />
     <uses-permission android:name="android.permission.READ_SMS" />
 
+    <!-- Alarms & timers -->
+    <uses-permission android:name="android.permission.SET_ALARM" />
+
+    <!-- Universal app/game launcher (needed to resolve launch intents on API 30+) -->
+    <uses-permission
+        android:name="android.permission.QUERY_ALL_PACKAGES"
+        tools:ignore="QueryAllPackagesPermission" />
+
     <!-- Camera/Flashlight -->
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.FLASHLIGHT" />
@@ -72,6 +80,23 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- Hosts AI generated HTML/CSS/JS mini apps in a WebView -->
+        <activity
+            android:name=".ui.WebAppActivity"
+            android:exported="false"
+            android:theme="@style/Theme.RevilendAI" />
+
+        <!-- Shares generated web apps with external browsers (Chrome) -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
 
         <!-- Floating HUD Service -->
         <service

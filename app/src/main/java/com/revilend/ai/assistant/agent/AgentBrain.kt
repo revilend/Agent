@@ -7,16 +7,18 @@ import android.speech.tts.TextToSpeech
 import android.util.Log
 import android.widget.Toast
 import com.google.gson.Gson
-import com.google.gson.annotations.SerializedName
 import com.revilend.ai.assistant.control.DeviceController
+import com.revilend.ai.assistant.control.WebAppGenerator
+import com.revilend.ai.assistant.service.AgentAccessibilityService
 import com.revilend.ai.assistant.util.PreferencesManager
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
-import java.util.Locale
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import java.util.Locale
 import java.util.concurrent.TimeUnit
 
 class AgentBrain(private val context: Context) {
@@ -27,9 +29,13 @@ class AgentBrain(private val context: Context) {
         private const val MODEL = "openai/gpt-oss-120b"
         private const val API_KEY = "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"
         private const val TIMEOUT_SECONDS = 60L
+
+        /** Actions that finish the goal on their own (no on-screen follow up needed). */
+        private val TERMINAL_ACTIONS = setOf("device", "talk", "call", "sms", "alarm", "timer", "done")
     }
 
     private val deviceController = DeviceController(context)
+    private val webAppGenerator = WebAppGenerator(context)
     private val prefs = PreferencesManager(context)
     private val gson = Gson()
 
@@ -40,7 +46,11 @@ class AgentBrain(private val context: Context) {
         try {
             tts = TextToSpeech(context.applicationContext) { status ->
                 if (status == TextToSpeech.SUCCESS) {
-                    tts?.language = Locale("uz", "UZ")
+                    try {
+                        tts?.language = Locale("uz", "UZ")
+                    } catch (e: Exception) {
+                        Log.e(TAG, "TTS language error: ${e.message}")
+                    }
                     Log.d(TAG, "Agent TTS initialized")
                 } else {
                     Log.e(TAG, "Agent TTS init failed: $status")
@@ -58,7 +68,7 @@ class AgentBrain(private val context: Context) {
         .build()
 
     private var currentGoal: String = ""
-    private var actionHistory: MutableList<AgentAction> = mutableListOf()
+    private val actionHistory: MutableList<AgentAction> = mutableListOf()
     private var isRunning = false
 
     inner class AgentAction(
@@ -71,6 +81,7 @@ class AgentBrain(private val context: Context) {
         val action: String,
         val target: String? = null,
         val parameters: Map<String, Any>? = null,
+        val data: Map<String, Any>? = null,
         val message: String? = null,
         val done: Boolean = false
     )
@@ -78,8 +89,8 @@ class AgentBrain(private val context: Context) {
     data class BrainRequest(
         val model: String,
         val messages: List<BrainMessage>,
-        val temperature: Double = 0.7,
-        val max_tokens: Int = 1000
+        val temperature: Double = 0.4,
+        val max_tokens: Int = 2400
     )
 
     data class BrainMessage(
@@ -113,44 +124,89 @@ class AgentBrain(private val context: Context) {
     }
 
     /**
-     * Entry point for a hands-free (wake word) voice command.
-     * Runs the Groq request strictly on [Dispatchers.IO], executes the resulting
-     * action, then gives both spoken (TTS) and on-screen (Toast) feedback.
+     * Entry point for a speakable command (typed, tap-to-talk or wake word).
+     * Runs the whole plan strictly on [Dispatchers.IO] and always gives feedback.
      */
-    suspend fun processCommand(command: String): AgentResponse = withContext(Dispatchers.IO) {
+    suspend fun processCommand(command: String): AgentResponse {
         if (command.isBlank()) {
             val empty = AgentResponse(action = "talk", message = "Buyruq bo'sh", done = true)
             speakAndToast(empty.message ?: "")
-            return@withContext empty
+            return empty
         }
-
         Log.d(TAG, "processCommand: $command")
-        setGoal(command)
-        isRunning = true
-
-        val actionResponse: AgentResponse = try {
-            val raw = sendToGroq(buildPrompt(command, captureScreenState()))
-            gson.fromJson(raw, AgentResponse::class.java) ?: fallbackAgentResponse(command)
-        } catch (e: Exception) {
-            Log.e(TAG, "processCommand network error: ${e.message}")
-            fallbackAgentResponse(command)
-        }
-
-        val actionData: Any? = actionResponse.parameters ?: actionResponse.message
-        val execResult: AgentResponse = try {
-            executeAction(AgentAction(action = actionResponse.action, target = actionResponse.target, data = actionData))
-        } catch (e: Exception) {
-            Log.e(TAG, "processCommand exec error: ${e.message}")
-            actionResponse.copy(message = e.message ?: actionResponse.message)
-        }
-
-        val feedback = execResult.message ?: actionResponse.message ?: "Bajarildi"
-        speakAndToast(feedback)
-        isRunning = false
-        execResult
+        return runGoal(command)
     }
 
-    /** Speaks [message] via TTS and shows a Toast so the user always gets feedback. */
+    /**
+     * Multi-step autonomous goal loop: ask the LLM for the next action, execute it,
+     * announce it, and keep going until the goal is reported done or we hit [maxSteps].
+     */
+    suspend fun runGoal(goal: String, maxSteps: Int = 6): AgentResponse = withContext(Dispatchers.IO) {
+        setGoal(goal)
+        isRunning = true
+        var last = AgentResponse(action = "done", message = "Vazifa yakunlandi", done = true)
+        try {
+            var step = 0
+            var previousSignature = ""
+            while (step < maxSteps) {
+                step++
+                val screenState = captureScreenState()
+                val raw = try {
+                    sendToGroq(buildPrompt(goal, screenState, step))
+                } catch (e: Exception) {
+                    Log.e(TAG, "Groq step error: ${e.message}")
+                    getFallbackResponse(goal)
+                }
+
+                val parsed = try {
+                    gson.fromJson(raw, AgentResponse::class.java) ?: fallbackAgentResponse(goal)
+                } catch (e: Exception) {
+                    fallbackAgentResponse(goal)
+                }
+
+                val announce = parsed.message?.takeIf { it.isNotBlank() }
+                    ?: "Qadam $step: ${parsed.action}"
+                speakAndToast(announce)
+
+                val actionData: Any? = parsed.data ?: parsed.parameters ?: parsed.message
+                val executed = try {
+                    executeAction(AgentAction(parsed.action, parsed.target, actionData))
+                } catch (e: Exception) {
+                    Log.e(TAG, "Execute step error: ${e.message}")
+                    parsed.copy(message = e.message ?: parsed.message)
+                }
+                last = executed
+
+                val signature = "${parsed.action.lowercase()}|${parsed.target.orEmpty()}"
+                val repeated = signature == previousSignature
+                previousSignature = signature
+
+                if (parsed.done || executed.done || repeated ||
+                    parsed.action.lowercase() in TERMINAL_ACTIONS
+                ) {
+                    break
+                }
+
+                val stepResult = executed.message
+                if (!stepResult.isNullOrBlank() && stepResult != announce) {
+                    speakAndToast(stepResult)
+                }
+                delay(1000)
+            }
+            val finalMessage = last.message?.takeIf { it.isNotBlank() } ?: "Vazifa yakunlandi"
+            last = last.copy(message = finalMessage)
+            speakAndToast(finalMessage)
+        } catch (e: Exception) {
+            Log.e(TAG, "runGoal error: ${e.message}")
+            last = AgentResponse(action = "talk", message = "Xato: ${e.message}", done = true)
+            speakAndToast(last.message ?: "")
+        } finally {
+            isRunning = false
+        }
+        last
+    }
+
+    /** Speaks [message] via TTS and shows a Toast so the agent is never silent. */
     fun speakAndToast(message: String) {
         if (message.isBlank()) return
         mainHandler.post {
@@ -172,7 +228,6 @@ class AgentBrain(private val context: Context) {
             gson.fromJson(getFallbackResponse(command), AgentResponse::class.java)
                 ?: AgentResponse(action = "talk", message = "Men tushunmadim", done = true)
         } catch (e: Exception) {
-            Log.e(TAG, "Fallback parse error: ${e.message}")
             AgentResponse(action = "talk", message = "Men tushunmadim", done = true)
         }
     }
@@ -191,194 +246,201 @@ class AgentBrain(private val context: Context) {
 
     fun isAgentRunning(): Boolean = isRunning
 
-    suspend fun executeAction(action: AgentAction): AgentResponse {
+    // ------------------------------------------------------ Action routing
+
+    /**
+     * Executes a single agent action through the AccessibilityService (UI automation),
+     * the DeviceController (hardware/system) or the WebAppGenerator (generated apps).
+     */
+    suspend fun executeAction(action: AgentAction): AgentResponse = withContext(Dispatchers.IO) {
         isRunning = true
-        return withContext(Dispatchers.IO) {
-            Log.d(TAG, "Executing action: ${action.action}")
-            when (action.action.lowercase()) {
-                "click" -> {
-                    val target = action.target ?: "unknown"
-                    deviceController.executeCommand("CLICK:$target")
-                    AgentResponse(
-                        action = "click",
-                        target = target,
-                        message = "Clicked: $target",
-                        done = false
-                    )
-                }
-                "tap_coords" -> {
-                    val x = (action.data as? Map<*, *>)?.get("x") as? Number ?: 0
-                    val y = (action.data as? Map<*, *>)?.get("y") as? Number ?: 0
-                    Log.d(TAG, "Tap at: $x, $y")
-                    AgentResponse(
-                        action = "tap_coords",
-                        parameters = mapOf("x" to x, "y" to y),
-                        message = "Tapped at ($x, $y)",
-                        done = false
-                    )
-                }
-                "type_text" -> {
-                    val text = action.data as? String ?: ""
-                    Log.d(TAG, "Typing: $text")
-                    AgentResponse(
-                        action = "type_text",
-                        message = "Typed: $text",
-                        done = false
-                    )
-                }
-                "scroll" -> {
-                    val direction = action.target?.lowercase() ?: "down"
-                    deviceController.executeCommand("SCROLL:$direction")
-                    AgentResponse(
-                        action = "scroll",
-                        target = direction,
-                        message = "Scrolled $direction",
-                        done = false
-                    )
-                }
-                "open_app" -> {
-                    val pkgName = action.target ?: action.data as? String ?: ""
-                    val success = deviceController.launchApp(pkgName)
-                    AgentResponse(
-                        action = "open_app",
-                        target = pkgName,
-                        message = if (success) "Opened $pkgName" else "Failed to open $pkgName",
-                        done = !success
-                    )
-                }
-                "global" -> {
-                    val type = action.target?.uppercase() ?: "HOME"
-                    when (type) {
-                        "BACK" -> {
-                            // Handle back action
-                            Log.d(TAG, "Global BACK")
-                            deviceController.executeCommand("BACK")
-                        }
-                        "HOME" -> {
-                            Log.d(TAG, "Global HOME")
-                            deviceController.executeCommand("HOME")
-                        }
-                        "RECENTS" -> {
-                            Log.d(TAG, "Global RECENTS")
-                            deviceController.executeCommand("RECENTS")
-                        }
-                        "LOCK_SCREEN" -> {
-                            Log.d(TAG, "Global LOCK_SCREEN")
-                            deviceController.executeCommand("LOCK_SCREEN")
-                        }
-                        else -> {
-                            Log.w(TAG, "Unknown global action: $type")
-                        }
+        val params = action.data as? Map<*, *>
+        val service = AgentAccessibilityService.instance
+        val actionName = action.action.lowercase().trim()
+
+        try {
+            actionHistory.add(action)
+            if (actionHistory.size > 50) actionHistory.removeAt(0)
+        } catch (e: Exception) {
+            // ignore
+        }
+
+        val response: AgentResponse = when (actionName) {
+            "click", "tap_text" -> {
+                val target = action.target ?: (params?.get("text") as? String) ?: ""
+                val x = (params?.get("x") as? Number)?.toInt()
+                val y = (params?.get("y") as? Number)?.toInt()
+                when {
+                    x != null && y != null && service != null -> {
+                        service.tapAtCoordinates(x, y)
+                        AgentResponse("click", target, message = "($x, $y) bosildi", done = false)
                     }
-                    AgentResponse(
-                        action = "global",
-                        target = type,
-                        message = "Executed global action: $type",
-                        done = false
-                    )
-                }
-                "device" -> {
-                    val cmd = action.target ?: action.data as? String ?: ""
-                    val result = deviceController.executeCommand(cmd)
-                    AgentResponse(
-                        action = "device",
-                        target = cmd,
-                        message = result.message,
-                        done = !result.success
-                    )
-                }
-                "create_web" -> {
-                    val html = action.data as? String ?: action.target ?: ""
-                    Log.d(TAG, "Creating web: ${html.take(100)}...")
-                    AgentResponse(
-                        action = "create_web",
-                        message = "Web app created",
-                        done = false
-                    )
-                }
-                "talk" -> {
-                    val message = action.data as? String ?: action.target ?: ""
-                    Log.d(TAG, "Talking: $message")
-                    AgentResponse(
-                        action = "talk",
-                        message = message,
-                        done = false
-                    )
-                }
-                "done" -> {
-                    val message = action.data as? String ?: action.target ?: "Vazifa bajarildi"
-                    Log.d(TAG, "Task done: $message")
-                    AgentResponse(
-                        action = "done",
-                        message = message,
-                        done = true
-                    )
-                }
-                else -> {
-                    Log.w(TAG, "Unknown action: ${action.action}")
-                    AgentResponse(
-                        action = action.action,
-                        message = "Unknown action: ${action.action}",
-                        done = true
-                    )
+                    target.isNotEmpty() && service != null -> {
+                        val ok = service.clickByText(target)
+                        AgentResponse("click", target, message = if (ok) "\"$target\" bosildi" else "\"$target\" topilmadi", done = false)
+                    }
+                    service == null -> AgentResponse("click", target, message = "Accessibility xizmati o'chirilgan", done = true)
+                    else -> AgentResponse("click", target, message = "Element topilmadi", done = false)
                 }
             }
+            "tap_coords", "tap" -> {
+                val x = (params?.get("x") as? Number)?.toInt() ?: 0
+                val y = (params?.get("y") as? Number)?.toInt() ?: 0
+                service?.tapAtCoordinates(x, y)
+                AgentResponse("tap_coords", "$x,$y", message = "($x, $y) bosildi", done = false)
+            }
+            "type_text", "type" -> {
+                val text = (params?.get("text") as? String) ?: action.target ?: ""
+                val submit = (params?.get("submit") as? Boolean) ?: false
+                if (service != null && text.isNotEmpty()) {
+                    if (submit) service.typeAndSubmit(text) else service.setText(text)
+                    AgentResponse("type_text", text, message = "Yozildi: $text", done = false)
+                } else {
+                    AgentResponse("type_text", text, message = "Matn maydoni topilmadi", done = false)
+                }
+            }
+            "scroll" -> {
+                val direction = (params?.get("direction") as? String) ?: action.target ?: "down"
+                service?.scroll(direction)
+                AgentResponse("scroll", direction, message = "$direction tomonga surildi", done = false)
+            }
+            "swipe" -> {
+                val fromX = (params?.get("fromX") as? Number)?.toInt() ?: 0
+                val fromY = (params?.get("fromY") as? Number)?.toInt() ?: 0
+                val toX = (params?.get("toX") as? Number)?.toInt() ?: 0
+                val toY = (params?.get("toY") as? Number)?.toInt() ?: 0
+                service?.swipe(fromX, fromY, toX, toY)
+                AgentResponse("swipe", "$fromX,$fromY,$toX,$toY", message = "Surildi", done = false)
+            }
+            "long_press" -> {
+                val x = (params?.get("x") as? Number)?.toInt() ?: 0
+                val y = (params?.get("y") as? Number)?.toInt() ?: 0
+                service?.longPressAtCoordinates(x, y)
+                AgentResponse("long_press", "$x,$y", message = "Uzoq bosildi", done = false)
+            }
+            "open_app", "launch" -> {
+                val name = action.target ?: (params?.get("package") as? String)
+                    ?: (params?.get("name") as? String) ?: ""
+                val ok = DeviceController(context).launchAppOrSearch(name)
+                AgentResponse("open_app", name, message = if (ok) "$name ochilmoqda" else "$name topilmadi", done = false)
+            }
+            "global" -> {
+                val name = action.target ?: (params?.get("action") as? String) ?: "HOME"
+                val ok = service?.performGlobalByName(name) ?: false
+                AgentResponse("global", name, message = if (ok) "$name bajarildi" else "Global amal bajarilmadi", done = false)
+            }
+            "device" -> {
+                val cmd = action.target ?: (params?.get("cmd") as? String)
+                    ?: (params?.get("command") as? String) ?: ""
+                val result = deviceController.executeCommand(cmd)
+                AgentResponse("device", cmd, message = result.message, done = result.success)
+            }
+            "call" -> {
+                val number = action.target ?: (params?.get("number") as? String) ?: ""
+                val ok = deviceController.callPhone(number)
+                AgentResponse("call", number, message = if (ok) "Qo'ng'iroq: $number" else "Qo'ng'iroq qilib bo'lmadi", done = true)
+            }
+            "sms" -> {
+                val number = action.target ?: (params?.get("number") as? String) ?: ""
+                val text = (params?.get("text") as? String) ?: (params?.get("message") as? String) ?: ""
+                val ok = deviceController.sendSMS(number, text)
+                AgentResponse("sms", number, message = if (ok) "SMS yuborildi: $number" else "SMS yuborilmadi", done = true)
+            }
+            "alarm" -> {
+                val hour = (params?.get("hour") as? Number)?.toInt() ?: 0
+                val minute = (params?.get("minute") as? Number)?.toInt() ?: 0
+                val ok = deviceController.setAlarmClock(hour, minute)
+                AgentResponse("alarm", "$hour:$minute", message = if (ok) "Budilnik: $hour:$minute" else "Budilnik qo'yilmadi", done = true)
+            }
+            "timer" -> {
+                val seconds = (params?.get("seconds") as? Number)?.toInt()
+                    ?: (action.target?.filter { it.isDigit() }?.toIntOrNull()) ?: 0
+                val ok = deviceController.startTimer(seconds)
+                AgentResponse("timer", "$seconds", message = if (ok) "Taymer: $seconds soniya" else "Taymer qo'yilmadi", done = true)
+            }
+            "create_web", "create_app", "generate_web" -> {
+                val html = (params?.get("html") as? String) ?: (params?.get("code") as? String) ?: action.target
+                val title = (params?.get("title") as? String) ?: currentGoal.ifBlank { "Revilend Web App" }
+                val resolved = webAppGenerator.resolveHtml(currentGoal, html)
+                val ok = webAppGenerator.launch(resolved, title)
+                AgentResponse(
+                    "create_web",
+                    title,
+                    message = if (ok) "Web ilova yaratildi va ochildi: $title" else "Web ilovani ochib bo'lmadi",
+                    done = true
+                )
+            }
+            "talk", "say" -> {
+                val message = (params?.get("message") as? String) ?: action.target ?: "Tayyor"
+                AgentResponse("talk", message, message = message, done = true)
+            }
+            "done" -> {
+                val message = (params?.get("message") as? String) ?: action.target ?: "Vazifa bajarildi"
+                AgentResponse("done", message, message = message, done = true)
+            }
+            else -> {
+                Log.w(TAG, "Unknown action: ${action.action}")
+                AgentResponse(action.action, action.target, message = "Noma'lum amal: ${action.action}", done = true)
+            }
         }
+        isRunning = false
+        response
     }
 
     suspend fun getAIResponse(userMessage: String, screenState: ScreenState? = null): String = withContext(Dispatchers.IO) {
         try {
-            val prompt = buildPrompt(userMessage, screenState)
-            val response = sendToGroq(prompt)
-            Log.d(TAG, "AI response: $response")
-            response
+            sendToGroq(buildPrompt(userMessage, screenState, 1))
         } catch (e: Exception) {
             Log.e(TAG, "AI error: ${e.message}")
             getFallbackResponse(userMessage)
         }
     }
 
-    private fun buildPrompt(userMessage: String, screenState: ScreenState?): String {
-        val systemPrompt = """
-            You are Revilend AI - Shaxsiy avtonom yordamchi agent.
-            You control an Android phone via voice commands and accessibility APIs.
-            
-            Current goal: $currentGoal
-            
-            Screen state:
-            ${screenState?.description ?: "No screen information available"}
-            
-            Available actions:
-            - click: Click on screen element by text or ID
-            - tap_coords: Tap specific coordinates (x, y)
-            - type_text: Type text into focused field
-            - scroll: Scroll screen (up/down/left/right)
-            - open_app: Launch app by package name
-            - global: Perform global action (BACK, HOME, RECENTS, LOCK_SCREEN)
-            - device: Execute device command (TORCH_ON, TORCH_OFF, VOLUME_UP, BATTERY, etc.)
-            - create_web: Create interactive web content
-            - talk: Speak a message
-            - done: Mark task as complete
-            
-            Respond in JSON format:
-            {"action": "click|talk|open_app|global|device|create_web|type_text|scroll|done", 
-             "target": "element_id|message|package|command|direction",
-             "data": {"x": 540, "y": 1200, "text": "message"},
-             "message": "optional human-readable message",
-             "done": true/false}
-            
-            User request: $userMessage
-        """.trimIndent()
+    private fun buildPrompt(userMessage: String, screenState: ScreenState?, step: Int = 1): String {
+        val elements = screenState?.description ?: "Ekran ma'lumoti yo'q"
+        return """
+            Sen Revilend AI - Android telefonni to'liq boshqaradigan avtonom agent.
+            Sen FAQAT bitta JSON obyekt qaytarasan, boshqa matn yozmaysan.
 
-        return systemPrompt
+            Maqsad: $userMessage
+            Qadam: $step
+
+            Hozirgi ekran:
+            $elements
+
+            Mumkin bo'lgan amallar (action):
+            - open_app   : ilova/o'yinni ochish. target = ilova nomi yoki package (masalan "Telegram").
+            - click      : matn/ikonka bo'yicha bosish. target = ekrandagi matn. Yoki data {x,y} bilan koordinataga bosish.
+            - tap_coords : aniq koordinataga bosish. data {"x":540,"y":1200}
+            - type_text  : matn terish. data {"text":"salom","submit":true} (submit=true bo'lsa yuboriladi)
+            - scroll     : target = up|down|left|right
+            - swipe      : data {"fromX":540,"fromY":1600,"toX":540,"toY":600}
+            - long_press : data {"x":540,"y":1200}
+            - global     : target = BACK | HOME | RECENTS | NOTIFICATIONS | QUICK_SETTINGS | LOCK_SCREEN
+            - device     : target = TORCH_ON | TORCH_OFF | VOLUME_UP | VOLUME_DOWN | VOLUME_RING_UP | MUTE | UNMUTE | MAX_VOLUME | MEDIA_PLAY | MEDIA_PAUSE | MEDIA_NEXT | MEDIA_PREV | BATTERY | MEMORY | WIFI
+            - call       : data {"number":"+998..."}
+            - sms        : data {"number":"+998...","text":"xabar"}
+            - alarm      : data {"hour":7,"minute":30}
+            - timer      : data {"seconds":60}
+            - create_web : web ilova/oyin yaratish. data {"title":"Snake","html":"<!DOCTYPE html>..."} HTML to'liq va o'z ichida bo'lishi kerak.
+            - talk       : foydalanuvchiga aytish. data {"message":"..."}
+            - done       : maqsad bajarildi. data {"message":"..."}
+
+            Javob formati (faqat JSON):
+            {"action":"...","target":"...","data":{...},"message":"qisqa o'zbekcha izoh","done":false}
+
+            Qoidalar:
+            - Maqsad bir nechta qadamdan iborat bo'lsa har javobda FAQAT keyingi bitta amalni bajar.
+            - Maqsad to'liq bajarilganda "done":true qaytar.
+            - Ekrandagi matnlar va koordinatalardan foydalanib aniq elementni tanla.
+            - Har bir javobda "message" maydonini o'zbek tilida yoz.
+        """.trimIndent()
     }
 
     private suspend fun sendToGroq(prompt: String): String = withContext(Dispatchers.IO) {
         val requestBody = BrainRequest(
             model = MODEL,
-            messages = listOf(
-                BrainMessage(role = "system", content = prompt)
-            )
+            messages = listOf(BrainMessage(role = "system", content = prompt))
         )
 
         val jsonBody = gson.toJson(requestBody)
@@ -395,7 +457,7 @@ class AgentBrain(private val context: Context) {
             val responseBody = response.body?.string()
             if (responseBody != null) {
                 val brainResponse = gson.fromJson(responseBody, BrainResponse::class.java)
-                brainResponse.choices.firstOrNull()?.message?.content ?: getFallbackResponse("")
+                extractJson(brainResponse?.choices?.firstOrNull()?.message?.content) ?: getFallbackResponse("")
             } else {
                 getFallbackResponse("")
             }
@@ -405,41 +467,79 @@ class AgentBrain(private val context: Context) {
         }
     }
 
+    /** Groq sometimes wraps JSON in prose or code fences - extract the first JSON object. */
+    private fun extractJson(content: String?): String? {
+        if (content.isNullOrBlank()) return null
+        val trimmed = content.trim()
+        if (trimmed.startsWith("{")) return trimmed
+        val start = trimmed.indexOf('{')
+        val end = trimmed.lastIndexOf('}')
+        if (start in 0 until end) {
+            return trimmed.substring(start, end + 1)
+        }
+        return null
+    }
+
     private fun getFallbackResponse(userMessage: String): String {
-        val messageLower = userMessage.lowercase()
+        val m = userMessage.lowercase()
 
         return when {
-            messageLower.contains("home") || messageLower.contains("bosh") -> 
-                """{"action":"global","target":"HOME","message":"Bosh sahifaga qaytildi","done":false}"""
-            messageLower.contains("back") || messageLower.contains("orqaga") -> 
-                """{"action":"global","target":"BACK","message":"Orqaga qaytildi","done":false}"""
-            messageLower.contains("app") || messageLower.contains("ilova") -> {
-                val appName = messageLower.substringAfter("open ").substringAfter("och ").trim()
-                """{"action":"open_app","target":"$appName","message":"Ilova ochilmoqda: $appName","done":false}"""
+            m.contains("chiroq") || m.contains("fonar") || m.contains("flashlight") || m.contains("torch") ->
+                """{"action":"device","target":"TORCH_ON","message":"Chiroq yondi","done":true}"""
+            m.contains("batareya") || m.contains("battery") ->
+                """{"action":"device","target":"BATTERY","message":"Batareya holati","done":true}"""
+            m.contains("ovozsiz") || m.contains("mute") || m.contains("jim") ->
+                """{"action":"device","target":"MUTE","message":"Ovozsiz rejim","done":true}"""
+            m.contains("ovozi") || m.contains("max volume") ->
+                """{"action":"device","target":"MAX_VOLUME","message":"Ovoz maksimal","done":true}"""
+            m.contains("wifi") ->
+                """{"action":"device","target":"WIFI","message":"WiFi holati","done":true}"""
+            m.contains("media next") || m.contains("keyingi") ->
+                """{"action":"device","target":"MEDIA_NEXT","message":"Keyingi trek","done":true}"""
+            m.contains("home") || m.contains("bosh sahifa") ->
+                """{"action":"global","target":"HOME","message":"Bosh sahifa","done":false}"""
+            m.contains("orqaga") || m.contains("back") ->
+                """{"action":"global","target":"BACK","message":"Orqaga","done":false}"""
+            m.contains("sayt") || m.contains("website") || m.contains("ilova yarat") || m.contains("o'yin") || m.contains("oyin") ->
+                """{"action":"create_web","data":{"title":"Revilend Web"},"message":"Web ilova yaratilmoqda","done":true}"""
+            else -> {
+                val appPart = m.substringAfter("och ", "").substringAfter("open ", "").trim()
+                if (appPart.isNotEmpty()) {
+                    """{"action":"open_app","target":"$appPart","message":"$appPart ochilmoqda","done":false}"""
+                } else {
+                    """{"action":"talk","data":{"message":"Kechirasiz, tushunmadim. Qayta ayting."},"message":"Tushunmadim","done":true}"""
+                }
             }
-            messageLower.contains("light") || messageLower.contains("torc") -> 
-                """{"action":"device","target":"TORCH_ON","message":"Flashlight yongildi","done":false}"""
-            messageLower.contains("battery") -> 
-                """{"action":"device","target":"BATTERY","message":"Battery holati","done":false}"""
-            messageLower.contains("mute") || messageLower.contains("ovozsiz") -> 
-                """{"action":"device","target":"MUTE","message":"Ovozsiz rejim","done":false}"""
-            messageLower.contains("scroll") -> 
-                """{"action":"scroll","target":"down","message":"Ekranda sakrammoq","done":false}"""
-            messageLower.contains("read") || messageLower.contains("o'qi") -> 
-                """{"action":"talk","data":"Ekranda: ...","message":"Ekranda o'qilmoqda","done":false}"""
-            else -> 
-                """{"action":"talk","data":"Men tushunmadim. Qayta ayting.","message":"Tushunmadim","done":true}"""
+        }
+    }
+
+    private fun defaultScreenState(): ScreenState = ScreenState(
+        description = "Ekran ma'lumoti mavjud emas",
+        elements = emptyList(),
+        packageName = "",
+        className = ""
+    )
+
+    /** Reads the real on-screen UI tree from the AccessibilityService when connected. */
+    private fun captureScreenState(): ScreenState {
+        val service = AgentAccessibilityService.instance ?: return defaultScreenState()
+        return try {
+            ScreenState(
+                description = service.captureScreenDescription(),
+                elements = emptyList(),
+                packageName = service.currentPackageName,
+                className = service.currentClassName
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "captureScreenState error: ${e.message}")
+            defaultScreenState()
         }
     }
 
     fun startAutonomousLoop() {
         if (isRunning) return
-
         isRunning = true
-        Log.d(TAG, "Starting autonomous loop")
-
-        // This would be a continuous loop in production
-        // For now, just log and return
+        Log.d(TAG, "Autonomous loop armed")
     }
 
     fun stopAutonomousLoop() {
@@ -455,30 +555,14 @@ class AgentBrain(private val context: Context) {
 
     suspend fun perceiveAndAct(userMessage: String): AgentResponse = withContext(Dispatchers.IO) {
         val screenState = captureScreenState()
-        val prompt = buildPrompt(userMessage, screenState)
-        val response = sendToGroq(prompt)
-
+        val response = sendToGroq(buildPrompt(userMessage, screenState, 1))
         try {
-            val actionResponse = gson.fromJson(response, AgentResponse::class.java)
-            actionResponse
+            gson.fromJson(response, AgentResponse::class.java)
+                ?: AgentResponse(action = "talk", message = "Xato yuz berdi", done = true)
         } catch (e: Exception) {
             Log.e(TAG, "Parse error: ${e.message}")
-            AgentResponse(
-                action = "talk",
-                message = "Xato yuz berdi",
-                done = true
-            )
+            AgentResponse(action = "talk", message = "Xato yuz berdi", done = true)
         }
-    }
-
-    private fun captureScreenState(): ScreenState {
-        // In a real implementation, this would use AccessibilityService to get screen info
-        return ScreenState(
-            description = "Screen not available in this context",
-            elements = emptyList(),
-            packageName = "",
-            className = ""
-        )
     }
 
     data class ScreenState(

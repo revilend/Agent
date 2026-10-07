@@ -34,6 +34,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var binding: ActivityMainBinding
     private lateinit var prefs: PreferencesManager
     private var isHudRunning = false
+    private var lastPermissionSignature = ""
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -122,6 +123,19 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun mark(granted: Boolean): String = if (granted) "✅ Grantylangan" else "❌ Ruxsatsiz"
+
+    /** Snapshot of every permission state, used to detect changes after returning from Settings. */
+    private fun permissionSignature(): String = listOf(
+        canDrawOverlays(),
+        isAccessibilityEnabled(),
+        hasPermission(Manifest.permission.RECORD_AUDIO),
+        hasPermission(Manifest.permission.CALL_PHONE),
+        hasPermission(Manifest.permission.SEND_SMS),
+        hasPermission(Manifest.permission.CAMERA)
+    ).joinToString(",")
+
+    private fun allCriticalGranted(): Boolean =
+        canDrawOverlays() && isAccessibilityEnabled() && hasPermission(Manifest.permission.RECORD_AUDIO)
 
     private fun hasPermission(permission: String): Boolean =
         ContextCompat.checkSelfPermission(this, permission) == PackageManager.PERMISSION_GRANTED
@@ -273,9 +287,16 @@ class MainActivity : AppCompatActivity() {
         super.onResume()
         // Re-check every permission dynamically so returning from Android Settings
         // immediately flips the status labels to green without restarting the app.
+        val signature = permissionSignature()
         checkPermissions()
         updatePermissionStatus()
         loadSettings()
+
+        if (lastPermissionSignature.isNotEmpty() && signature != lastPermissionSignature) {
+            val message = if (allCriticalGranted()) "✅ Ruxsatlar yangilandi" else "Ruxsatlar o'zgardi"
+            Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
+        }
+        lastPermissionSignature = signature
     }
 
     override fun onRequestPermissionsResult(
