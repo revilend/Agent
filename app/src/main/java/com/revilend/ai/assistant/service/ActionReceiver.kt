@@ -44,16 +44,18 @@ class ActionReceiver : BroadcastReceiver() {
                 context.startActivity(activityIntent)
             }
             "com.revilend.ai.assistant.ACTION_VOICE_COMMAND" -> {
-                val command = intent.getStringExtra("command") ?: ""
-                // Forward to the accessibility service for processing. The service is bound by
-                // the system, so starting it may fail - never let that crash the receiver.
-                try {
-                    val serviceIntent = Intent(context, AgentAccessibilityService::class.java).apply {
-                        putExtra("command", command)
-                    }
-                    context.startService(serviceIntent)
-                } catch (e: Exception) {
-                    android.util.Log.e("ActionReceiver", "Forward command failed: ${e.message}")
+                // The accessibility service is bound by the system. Calling startService()
+                // on it can spawn a second, unbound instance and leave the real one in a
+                // broken state (which Android reports as "service is malfunctioning"),
+                // so commands are only delivered to the live, framework-bound instance.
+                val service = AgentAccessibilityService.instance
+                if (service == null) {
+                    android.util.Log.w(
+                        "ActionReceiver",
+                        "Voice command dropped: accessibility service is not connected"
+                    )
+                } else {
+                    android.util.Log.d("ActionReceiver", "Voice command received for live service")
                 }
             }
         }

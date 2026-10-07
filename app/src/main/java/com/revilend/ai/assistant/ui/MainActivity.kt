@@ -93,7 +93,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun checkPermissions() {
         val showOverlay = !canDrawOverlays()
-        val showAccessibility = !isAccessibilityEnabled()
+        val showAccessibility = !isAccessibilityEnabled() || !isAccessibilityConnected()
 
         binding.cardOverlay.visibility = if (showOverlay) View.VISIBLE else View.GONE
         binding.cardAccessibility.visibility = if (showAccessibility) View.VISIBLE else View.GONE
@@ -106,9 +106,26 @@ class MainActivity : AppCompatActivity() {
         binding.tvOverlayStatus.text = if (overlayGranted) "✅ Grantylangan" else "❌ Ruxsatsiz"
         binding.tvOverlayStatus.setTextColor(if (overlayGranted) GREEN else RED)
 
-        val accessGranted = isAccessibilityEnabled()
-        binding.tvAccessibilityStatus.text = if (accessGranted) "✅ Joylashtirilgan" else "❌ Yoʻq"
-        binding.tvAccessibilityStatus.setTextColor(if (accessGranted) GREEN else RED)
+        val enabled = isAccessibilityEnabled()
+        val connected = isAccessibilityConnected()
+        when {
+            !enabled -> {
+                binding.tvAccessibilityStatus.text = "❌ Yoʻq"
+                binding.tvAccessibilityStatus.setTextColor(RED)
+            }
+            !connected -> {
+                // Switch is on in Settings but the system never handed us a live service:
+                // the classic "Bu xizmat xato ishlayapti" state (MIUI kills it via battery
+                // optimisation / missing autostart).
+                binding.tvAccessibilityStatus.text =
+                    "⚠️ Yoqilgan, lekin ulanmagan\nMIUI: Avtomatik ishga tushirish ON + Batareya → Cheklovsiz qilib qoʻying"
+                binding.tvAccessibilityStatus.setTextColor(RED)
+            }
+            else -> {
+                binding.tvAccessibilityStatus.text = "✅ Faol (ishlayapti)"
+                binding.tvAccessibilityStatus.setTextColor(GREEN)
+            }
+        }
 
         val mic = hasPermission(Manifest.permission.RECORD_AUDIO)
         val phone = hasPermission(Manifest.permission.CALL_PHONE)
@@ -128,6 +145,7 @@ class MainActivity : AppCompatActivity() {
     private fun permissionSignature(): String = listOf(
         canDrawOverlays(),
         isAccessibilityEnabled(),
+        isAccessibilityConnected(),
         hasPermission(Manifest.permission.RECORD_AUDIO),
         hasPermission(Manifest.permission.CALL_PHONE),
         hasPermission(Manifest.permission.SEND_SMS),
@@ -147,6 +165,13 @@ class MainActivity : AppCompatActivity() {
             true
         }
     }
+
+    /**
+     * True only when the framework has actually bound our service, i.e. the service
+     * process is alive. Settings can show the switch as ON while this is false, which
+     * is exactly what Android/MIUI reports as "Bu xizmat xato ishlayapti".
+     */
+    private fun isAccessibilityConnected(): Boolean = AgentAccessibilityService.isConnected()
 
     private fun isAccessibilityEnabled(): Boolean {
         val am = getSystemService(Context.ACCESSIBILITY_SERVICE) as? AccessibilityManager ?: return false

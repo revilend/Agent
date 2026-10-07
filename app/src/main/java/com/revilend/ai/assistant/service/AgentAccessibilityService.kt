@@ -2,8 +2,11 @@ package com.revilend.ai.assistant.service
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
+import android.content.Intent
+import android.graphics.Path
 import android.graphics.Rect
 import android.os.Build
+import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.speech.tts.TextToSpeech
@@ -12,9 +15,18 @@ import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import com.revilend.ai.assistant.control.DeviceController
 import com.revilend.ai.assistant.util.PreferencesManager
-import com.revilend.ai.assistant.util.SpeechManager
 import java.util.Locale
 
+/**
+ * Device control / UI automation service.
+ *
+ * IMPORTANT: Android binds accessibility services on the main thread with a strict
+ * timeout and marks any service that throws or fails to answer during binding as
+ * "malfunctioning" (MIUI shows "Bu xizmat xato ishlayapti"). Because of that the
+ * lifecycle callbacks below do the absolute minimum: no SharedPreferences reads,
+ * no SpeechRecognizer, no TextToSpeech, no setServiceInfo() and no engine lookups.
+ * Everything else is created lazily, on first real use, and guarded.
+ */
 class AgentAccessibilityService : AccessibilityService() {
 
     companion object {
@@ -28,14 +40,13 @@ class AgentAccessibilityService : AccessibilityService() {
         fun isConnected(): Boolean = instance != null
     }
 
-    private lateinit var speechManager: SpeechManager
-    private lateinit var deviceController: DeviceController
-    private lateinit var preferencesManager: PreferencesManager
+    // Created only when an action actually needs them (never during binding).
+    private var deviceControllerRef: DeviceController? = null
+    private var preferencesRef: PreferencesManager? = null
+    private var ttsRef: TextToSpeech? = null
 
-    private var tts: TextToSpeech? = null
     private val handler = Handler(Looper.getMainLooper())
 
-    private var currentAction: String = ""
     private var lastFocusedNode: AccessibilityNodeInfo? = null
 
     // Window and node information
@@ -49,43 +60,26 @@ class AgentAccessibilityService : AccessibilityService() {
 
     private var rootNode: AccessibilityNodeInfo? = null
 
+    private fun device(): DeviceController? = try {
+        deviceControllerRef ?: DeviceController(applicationContext).also { deviceControllerRef = it }
+    } catch (t: Throwable) {
+        Log.e(TAG, "DeviceController unavailable: ${t.message}")
+        null
+    }
+
+    private fun prefs(): PreferencesManager? = try {
+        preferencesRef ?: PreferencesManager(applicationContext).also { preferencesRef = it }
+    } catch (t: Throwable) {
+        Log.e(TAG, "Preferences unavailable: ${t.message}")
+        null
+    }
+
+    // ------------------------------------------------------------------ Lifecycle
+
     override fun onCreate() {
         super.onCreate()
-        try {
-            Log.d(TAG, "Accessibility Service created")
-            preferencesManager = PreferencesManager(this)
-            deviceController = DeviceController(this)
-            speechManager = SpeechManager(this)
-            speechManager.voiceLanguage = preferencesManager.voiceLanguage
-
-            tts = TextToSpeech(this) { status ->
-                if (status == TextToSpeech.SUCCESS) {
-                    try {
-                        tts?.language = Locale.US
-                    } catch (e: Exception) {
-                        Log.e(TAG, "TTS language error: ${e.message}")
-                    }
-                    Log.d(TAG, "TTS initialized")
-                } else {
-                    Log.e(TAG, "TTS init failed")
-                }
-            }
-
-            val serviceInfo = android.accessibilityservice.AccessibilityServiceInfo().apply {
-                flags = android.accessibilityservice.AccessibilityServiceInfo.FLAG_INCLUDE_NOT_IMPORTANT_VIEWS or
-                        android.accessibilityservice.AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS
-                eventTypes = AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED or
-                        AccessibilityEvent.TYPE_VIEW_CLICKED or
-                        AccessibilityEvent.TYPE_VIEW_FOCUSED or
-                        AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED or
-                        AccessibilityEvent.TYPE_WINDOWS_CHANGED or
-                        AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED
-                notificationTimeout = 100
-            }
-            setServiceInfo(serviceInfo)
-        } catch (e: Exception) {
-            Log.e(TAG, "onCreate error: ${e.message}")
-        }
+        // Intentionally empty: the system is still binding us here.
+        Log.d(TAG, "onCreate")
     }
 
     override fun onServiceConnected() {
@@ -94,9 +88,8 @@ class AgentAccessibilityService : AccessibilityService() {
         try {
             instance = this
             Log.d(TAG, "Accessibility Service connected")
-            speak("Revilend AI tayyor, sizni tinglamoqdaman.")
-        } catch (e: Exception) {
-            Log.e(TAG, "onServiceConnected error: ${e.message}")
+        } catch (t: Throwable) {
+            Log.e(TAG, "onServiceConnected error: ${t.message}")
         }
     }
 
@@ -108,26 +101,18 @@ class AgentAccessibilityService : AccessibilityService() {
                 AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> {
                     currentPackageName = event.packageName?.toString() ?: currentPackageName
                     currentClassName = event.className?.toString() ?: currentClassName
-                    Log.d(TAG, "Window changed: $currentPackageName / $currentClassName")
-                    updateRootNode()
-                }
-                AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED -> {
-                    if (rootNode == null) updateRootNode()
+                    rootNode = null
                 }
                 AccessibilityEvent.TYPE_VIEW_FOCUSED -> {
                     lastFocusedNode = event.source?.let { AccessibilityNodeInfo.obtain(it) }
-                    Log.d(TAG, "View focused: ${lastFocusedNode?.text}")
                 }
-                AccessibilityEvent.TYPE_VIEW_CLICKED -> {
-                    Log.d(TAG, "View clicked: ${event.source?.text}")
-                    reportActionStatus("click", "Clicked: ${event.source?.text}")
-                }
-                AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED -> {
-                    Log.d(TAG, "Text changed: ${event.source?.text}")
+                else -> {
+                    // Other event types are intentionally ignored: the screen is read
+                    // on demand through captureScreenDescription().
                 }
             }
-        } catch (e: Exception) {
-            Log.e(TAG, "onAccessibilityEvent error: ${e.message}")
+        } catch (t: Throwable) {
+            Log.e(TAG, "onAccessibilityEvent error: ${t.message}")
         }
     }
 
@@ -135,33 +120,63 @@ class AgentAccessibilityService : AccessibilityService() {
         try {
             Log.d(TAG, "Accessibility Service interrupted")
             cleanup()
-        } catch (e: Exception) {
-            Log.e(TAG, "onInterrupt error: ${e.message}")
+        } catch (t: Throwable) {
+            Log.e(TAG, "onInterrupt error: ${t.message}")
         }
+    }
+
+    override fun onUnbind(intent: Intent?): Boolean {
+        try {
+            if (instance === this) instance = null
+            handler.removeCallbacksAndMessages(null)
+            cleanup()
+            Log.d(TAG, "Accessibility Service unbound")
+        } catch (t: Throwable) {
+            Log.e(TAG, "onUnbind error: ${t.message}")
+        }
+        return super.onUnbind(intent)
+    }
+
+    override fun onDestroy() {
+        try {
+            if (instance === this) instance = null
+            handler.removeCallbacksAndMessages(null)
+            cleanup()
+            ttsRef?.stop()
+            ttsRef?.shutdown()
+        } catch (t: Throwable) {
+            Log.e(TAG, "onDestroy error: ${t.message}")
+        }
+        ttsRef = null
+        super.onDestroy()
+    }
+
+    private fun cleanup() {
+        rootNode = null
+        lastFocusedNode = null
     }
 
     // ------------------------------------------------- Universal screen parser
 
-    private fun updateRootNode() {
-        try {
-            rootNode = rootInActiveWindow
-        } catch (e: Exception) {
-            Log.e(TAG, "updateRootNode error: ${e.message}")
-        }
+    private fun currentRoot(): AccessibilityNodeInfo? = try {
+        val root = rootInActiveWindow ?: rootNode
+        if (root != null) rootNode = root
+        root
+    } catch (t: Throwable) {
+        Log.e(TAG, "currentRoot error: ${t.message}")
+        null
     }
 
     /**
-     * Reads the full active window tree and returns a compact, LLM friendly
-     * description of every visible text, clickable element, input field and its
-     * on-screen coordinates.
+     * Reads the active window tree and returns a compact, LLM friendly description
+     * of every visible text, clickable element, input field and its coordinates.
      */
     fun captureScreenDescription(): String {
         return try {
-            val root = rootInActiveWindow ?: rootNode
+            val root = currentRoot()
             if (root == null) {
                 return "Ekran tarkibi mavjud emas (package=$currentPackageName)"
             }
-            rootNode = root
             val sb = StringBuilder()
             sb.append("Package: ").append(root.packageName ?: currentPackageName)
             sb.append(", Activity: ").append(currentClassName).append('\n')
@@ -170,8 +185,8 @@ class AgentAccessibilityService : AccessibilityService() {
             appendVisibleNodes(root, sb, 0, seen)
             if (sb.length > 8000) sb.setLength(8000)
             sb.toString()
-        } catch (e: Exception) {
-            Log.e(TAG, "captureScreenDescription error: ${e.message}")
+        } catch (t: Throwable) {
+            Log.e(TAG, "captureScreenDescription error: ${t.message}")
             "Ekran o'qishda xatolik"
         }
     }
@@ -194,13 +209,13 @@ class AgentAccessibilityService : AccessibilityService() {
             val clickable = node.isClickable
             val editable = node.isEditable
 
-            if ((label != null && label.isNotEmpty()) || clickable || editable) {
+            if ((!label.isNullOrEmpty()) || clickable || editable) {
                 val rect = Rect()
                 node.getBoundsInScreen(rect)
                 val key = "$label|${rect.left},${rect.top}"
                 if (rect.width() > 0 && rect.height() > 0 && seen.add(key)) {
                     sb.append("- ")
-                    if (label != null && label.isNotEmpty()) {
+                    if (!label.isNullOrEmpty()) {
                         sb.append('"').append(label.take(80)).append("\" ")
                     }
                     if (editable) sb.append("[input] ")
@@ -218,18 +233,17 @@ class AgentAccessibilityService : AccessibilityService() {
             for (i in 0 until childCount) {
                 appendVisibleNodes(node.getChild(i), sb, depth + 1, seen)
             }
-        } catch (e: Exception) {
-            Log.e(TAG, "appendVisibleNodes error: ${e.message}")
+        } catch (t: Throwable) {
+            Log.e(TAG, "appendVisibleNodes error: ${t.message}")
         }
     }
 
     fun findNodeByText(text: String): AccessibilityNodeInfo? {
         return try {
-            val root = rootInActiveWindow ?: rootNode ?: return null
-            rootNode = root
+            val root = currentRoot() ?: return null
             findNodeRecursive(root, text)
-        } catch (e: Exception) {
-            Log.e(TAG, "findNodeByText error: ${e.message}")
+        } catch (t: Throwable) {
+            Log.e(TAG, "findNodeByText error: ${t.message}")
             null
         }
     }
@@ -247,17 +261,17 @@ class AgentAccessibilityService : AccessibilityService() {
                 val found = findNodeRecursive(child, text)
                 if (found != null) return found
             }
-        } catch (e: Exception) {
-            Log.e(TAG, "findNodeRecursive error: ${e.message}")
+        } catch (t: Throwable) {
+            Log.e(TAG, "findNodeRecursive error: ${t.message}")
         }
         return null
     }
 
     fun findNodeById(id: String): AccessibilityNodeInfo? {
         return try {
-            val root = rootInActiveWindow ?: rootNode ?: return null
+            val root = currentRoot() ?: return null
             findNodeByIdRecursive(root, id)
-        } catch (e: Exception) {
+        } catch (t: Throwable) {
             null
         }
     }
@@ -272,8 +286,8 @@ class AgentAccessibilityService : AccessibilityService() {
                 val found = findNodeByIdRecursive(child, id)
                 if (found != null) return found
             }
-        } catch (e: Exception) {
-            Log.e(TAG, "findNodeByIdRecursive error: ${e.message}")
+        } catch (t: Throwable) {
+            Log.e(TAG, "findNodeByIdRecursive error: ${t.message}")
         }
         return null
     }
@@ -281,9 +295,9 @@ class AgentAccessibilityService : AccessibilityService() {
     /** Finds the first editable field (input/search box) on screen. */
     fun findEditableNode(): AccessibilityNodeInfo? {
         return try {
-            val root = rootInActiveWindow ?: rootNode ?: return null
+            val root = currentRoot() ?: return null
             findEditableRecursive(root)
-        } catch (e: Exception) {
+        } catch (t: Throwable) {
             null
         }
     }
@@ -296,8 +310,8 @@ class AgentAccessibilityService : AccessibilityService() {
                 val found = findEditableRecursive(child)
                 if (found != null) return found
             }
-        } catch (e: Exception) {
-            Log.e(TAG, "findEditableRecursive error: ${e.message}")
+        } catch (t: Throwable) {
+            Log.e(TAG, "findEditableRecursive error: ${t.message}")
         }
         return null
     }
@@ -305,19 +319,14 @@ class AgentAccessibilityService : AccessibilityService() {
     // --------------------------------------------------------------- Actions
 
     fun clickNode(node: AccessibilityNodeInfo?): Boolean {
-        if (node == null) {
-            Log.w(TAG, "Cannot click null node")
-            return false
-        }
+        if (node == null) return false
         return try {
             if (node.isClickable && node.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
-                Log.d(TAG, "Clicked node: ${node.text}")
                 reportActionStatus("click", "Clicked: ${node.text}")
                 true
             } else {
                 val parent = findClickableParent(node)
                 if (parent != null && parent.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
-                    Log.d(TAG, "Clicked parent: ${parent.text}")
                     reportActionStatus("click", "Clicked: ${parent.text}")
                     true
                 } else {
@@ -330,8 +339,8 @@ class AgentAccessibilityService : AccessibilityService() {
                     } else false
                 }
             }
-        } catch (e: Exception) {
-            Log.e(TAG, "Click error: ${e.message}")
+        } catch (t: Throwable) {
+            Log.e(TAG, "Click error: ${t.message}")
             false
         }
     }
@@ -340,103 +349,92 @@ class AgentAccessibilityService : AccessibilityService() {
     fun clickByText(target: String): Boolean {
         return try {
             val node = findNodeByText(target)
-            if (node != null) {
-                clickNode(node)
-            } else {
-                Log.w(TAG, "Element not found: $target")
-                false
-            }
-        } catch (e: Exception) {
+            if (node != null) clickNode(node) else false
+        } catch (t: Throwable) {
             false
         }
     }
 
     private fun findClickableParent(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
-        var current: AccessibilityNodeInfo? = node
-        var depth = 0
-        while (current != null && depth < 8) {
-            if (current.isClickable) return AccessibilityNodeInfo.obtain(current)
-            current = current.parent
-            depth++
+        try {
+            var current: AccessibilityNodeInfo? = node
+            var depth = 0
+            while (current != null && depth < 8) {
+                if (current.isClickable) return AccessibilityNodeInfo.obtain(current)
+                current = current.parent
+                depth++
+            }
+        } catch (t: Throwable) {
+            Log.e(TAG, "findClickableParent error: ${t.message}")
         }
         return null
     }
 
     fun performAgentGlobalAction(action: Int) {
-        val spoken = when (action) {
-            GLOBAL_ACTION_HOME -> "Bosh sahifaga qaytildi"
-            GLOBAL_ACTION_BACK -> "Orqaga qaytildi"
-            GLOBAL_ACTION_RECENTS -> "Joriy vazifalar"
-            GLOBAL_ACTION_NOTIFICATIONS -> "Bildirishnomalar ochildi"
-            GLOBAL_ACTION_QUICK_SETTINGS -> "Tezkor sozlamalar"
-            GLOBAL_ACTION_LOCK_SCREEN -> "Ekran qulflandi"
-            else -> null
-        }
         try {
-            performGlobalAction(action)
-            if (spoken != null) {
-                Log.d(TAG, "Global action executed: $action")
-                speak(spoken)
-            } else {
-                Log.w(TAG, "Unknown global action: $action")
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Global action error: ${e.message}")
+            val performed = performGlobalAction(action)
+            Log.d(TAG, "Global action $action -> $performed")
+        } catch (t: Throwable) {
+            Log.e(TAG, "Global action error: ${t.message}")
         }
     }
 
     /** Executes a global navigation action by its friendly name. */
     fun performGlobalByName(name: String): Boolean {
-        val action = when (name.uppercase().trim()) {
-            "BACK", "ORQAGA" -> GLOBAL_ACTION_BACK
-            "HOME", "BOSH" -> GLOBAL_ACTION_HOME
-            "RECENTS", "VAZIFALAR" -> GLOBAL_ACTION_RECENTS
-            "NOTIFICATIONS", "HABARLAR" -> GLOBAL_ACTION_NOTIFICATIONS
-            "QUICK_SETTINGS", "TEZKOR" -> GLOBAL_ACTION_QUICK_SETTINGS
-            "LOCK_SCREEN", "QULF" -> GLOBAL_ACTION_LOCK_SCREEN
-            else -> return false
+        return try {
+            when (name.uppercase().trim()) {
+                "BACK", "ORQAGA" -> performAgentGlobalAction(GLOBAL_ACTION_BACK)
+                "HOME", "BOSH" -> performAgentGlobalAction(GLOBAL_ACTION_HOME)
+                "RECENTS", "VAZIFALAR" -> performAgentGlobalAction(GLOBAL_ACTION_RECENTS)
+                "NOTIFICATIONS", "HABARLAR" -> performAgentGlobalAction(GLOBAL_ACTION_NOTIFICATIONS)
+                "QUICK_SETTINGS", "TEZKOR" -> performAgentGlobalAction(GLOBAL_ACTION_QUICK_SETTINGS)
+                // GLOBAL_ACTION_LOCK_SCREEN only exists from API 28.
+                "LOCK_SCREEN", "QULF" -> if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                    performAgentGlobalAction(GLOBAL_ACTION_LOCK_SCREEN)
+                } else {
+                    return false
+                }
+                else -> return false
+            }
+            true
+        } catch (t: Throwable) {
+            Log.e(TAG, "performGlobalByName error: ${t.message}")
+            false
         }
-        performAgentGlobalAction(action)
-        return true
     }
 
     fun tapAtCoordinates(x: Int, y: Int) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
-            Log.w(TAG, "Tap gesture not supported on API < 26")
-            return
-        }
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         try {
-            val path = android.graphics.Path().apply { moveTo(x.toFloat(), y.toFloat()) }
+            val path = Path().apply { moveTo(x.toFloat(), y.toFloat()) }
             val gesture = GestureDescription.Builder()
                 .addStroke(GestureDescription.StrokeDescription(path, 0L, 100L))
                 .build()
             dispatchGesture(gesture, null, null)
-            Log.d(TAG, "Tapped at: $x, $y")
             reportActionStatus("tap", "Tapped at ($x, $y)")
-        } catch (e: Exception) {
-            Log.e(TAG, "Tap gesture error: ${e.message}")
+        } catch (t: Throwable) {
+            Log.e(TAG, "Tap gesture error: ${t.message}")
         }
     }
 
     fun longPressAtCoordinates(x: Int, y: Int) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         try {
-            val path = android.graphics.Path().apply { moveTo(x.toFloat(), y.toFloat()) }
+            val path = Path().apply { moveTo(x.toFloat(), y.toFloat()) }
             val gesture = GestureDescription.Builder()
                 .addStroke(GestureDescription.StrokeDescription(path, 0L, 500L))
                 .build()
             dispatchGesture(gesture, null, null)
-            Log.d(TAG, "Long pressed at: $x, $y")
             reportActionStatus("longpress", "Long pressed at ($x, $y)")
-        } catch (e: Exception) {
-            Log.e(TAG, "Long press gesture error: ${e.message}")
+        } catch (t: Throwable) {
+            Log.e(TAG, "Long press gesture error: ${t.message}")
         }
     }
 
     fun swipe(fromX: Int, fromY: Int, toX: Int, toY: Int, duration: Long = 300) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         try {
-            val path = android.graphics.Path().apply {
+            val path = Path().apply {
                 moveTo(fromX.toFloat(), fromY.toFloat())
                 lineTo(toX.toFloat(), toY.toFloat())
             }
@@ -444,52 +442,54 @@ class AgentAccessibilityService : AccessibilityService() {
                 .addStroke(GestureDescription.StrokeDescription(path, 0L, duration))
                 .build()
             dispatchGesture(gesture, null, null)
-            Log.d(TAG, "Swiped from ($fromX,$fromY) to ($toX,$toY)")
             reportActionStatus("swipe", "Swiped from ($fromX,$fromY) to ($toX,$toY)")
-        } catch (e: Exception) {
-            Log.e(TAG, "Swipe gesture error: ${e.message}")
+        } catch (t: Throwable) {
+            Log.e(TAG, "Swipe gesture error: ${t.message}")
         }
     }
 
     /** Screen-size aware scroll in the requested direction. */
     fun scroll(direction: String) {
-        val dm = resources.displayMetrics
-        val cx = dm.widthPixels / 2
-        val cy = dm.heightPixels / 2
-        val top = (dm.heightPixels * 0.28).toInt()
-        val bottom = (dm.heightPixels * 0.78).toInt()
-        val left = (dm.widthPixels * 0.2).toInt()
-        val right = (dm.widthPixels * 0.8).toInt()
-        when (direction.lowercase().trim()) {
-            "up" -> swipe(cx, top, cx, bottom, 300)
-            "down" -> swipe(cx, bottom, cx, top, 300)
-            "left" -> swipe(right, cy, left, cy, 300)
-            "right" -> swipe(left, cy, right, cy, 300)
-            else -> Log.w(TAG, "Unknown scroll direction: $direction")
+        try {
+            val dm = resources.displayMetrics
+            val cx = dm.widthPixels / 2
+            val cy = dm.heightPixels / 2
+            val top = (dm.heightPixels * 0.28).toInt()
+            val bottom = (dm.heightPixels * 0.78).toInt()
+            val left = (dm.widthPixels * 0.2).toInt()
+            val right = (dm.widthPixels * 0.8).toInt()
+            when (direction.lowercase().trim()) {
+                "up" -> swipe(cx, top, cx, bottom, 300)
+                "down" -> swipe(cx, bottom, cx, top, 300)
+                "left" -> swipe(right, cy, left, cy, 300)
+                "right" -> swipe(left, cy, right, cy, 300)
+                else -> Log.w(TAG, "Unknown scroll direction: $direction")
+            }
+        } catch (t: Throwable) {
+            Log.e(TAG, "scroll error: ${t.message}")
         }
     }
 
     fun setText(text: String): Boolean {
-        val node = lastFocusedNode?.takeIf { it.isEditable } ?: findEditableNode()
-        if (node == null) {
-            Log.w(TAG, "No focused/editable node for text input")
-            return false
-        }
         return try {
-            node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, createBundleForSetText(text))
-            lastFocusedNode = node
-            Log.d(TAG, "Text set: $text")
-            reportActionStatus("type_text", "Typed: $text")
-            true
-        } catch (e: Exception) {
-            Log.e(TAG, "Set text error: ${e.message}")
+            val node = lastFocusedNode?.takeIf { it.isEditable } ?: findEditableNode()
+            if (node == null) {
+                Log.w(TAG, "No focused/editable node for text input")
+                false
+            } else {
+                node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, createBundleForSetText(text))
+                lastFocusedNode = node
+                reportActionStatus("type_text", "Typed: $text")
+                true
+            }
+        } catch (t: Throwable) {
+            Log.e(TAG, "Set text error: ${t.message}")
             false
         }
     }
 
     fun typeAndSubmit(text: String) {
-        val typed = setText(text)
-        if (!typed) return
+        if (!setText(text)) return
         handler.postDelayed({
             try {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
@@ -505,93 +505,118 @@ class AgentAccessibilityService : AccessibilityService() {
                         return@postDelayed
                     }
                 }
-            } catch (e: Exception) {
-                Log.e(TAG, "Submit error: ${e.message}")
+            } catch (t: Throwable) {
+                Log.e(TAG, "Submit error: ${t.message}")
             }
         }, 350)
     }
 
     fun openApp(packageName: String) {
-        Log.d(TAG, "Opening app: $packageName")
-        deviceController.launchAppOrSearch(packageName)
-        reportActionStatus("open_app", "Opening: $packageName")
+        try {
+            device()?.launchAppOrSearch(packageName)
+            reportActionStatus("open_app", "Opening: $packageName")
+        } catch (t: Throwable) {
+            Log.e(TAG, "openApp error: ${t.message}")
+        }
     }
 
     /** Universal launcher - launches installed apps/games or falls back to web/Play Store. */
     fun openAppUniversal(name: String): Boolean {
-        Log.d(TAG, "Universal open: $name")
-        val ok = deviceController.launchAppOrSearch(name)
-        reportActionStatus("open_app", "Opening: $name")
-        return ok
-    }
-
-    fun executeDeviceCommand(command: String): String {
-        val result = deviceController.executeCommand(command)
-        Log.d(TAG, "Device command: $command -> ${result.message}")
-        speak(result.message)
-        reportActionStatus("device", result.message)
-        return result.message
-    }
-
-    fun getDeviceInfo(infoType: String): String? {
-        return when (infoType.lowercase()) {
-            "battery" -> {
-                val battery = deviceController.getBatteryInfo()
-                "Batareya: ${battery.percentage}%, ${if (battery.isCharging) "quvvatlanmoqda" else "quvvatlanmayapti"}"
-            }
-            "memory" -> {
-                val memory = deviceController.getMemoryInfo()
-                "RAM: ${memory.availableMemory / (1024 * 1024)}MB bo'sh / ${memory.totalMemory / (1024 * 1024)}MB"
-            }
-            "wifi" -> "WiFi: ${deviceController.getWifiInfo()?.ssid ?: "ulanmagan"}"
-            "volume" -> "Media: ${deviceController.getMediaVolume()}/${deviceController.getMaxMediaVolume()}"
-            else -> null
+        return try {
+            val ok = device()?.launchAppOrSearch(name) ?: false
+            reportActionStatus("open_app", "Opening: $name")
+            ok
+        } catch (t: Throwable) {
+            Log.e(TAG, "openAppUniversal error: ${t.message}")
+            false
         }
     }
 
+    fun executeDeviceCommand(command: String): String {
+        return try {
+            val result = device()?.executeCommand(command)
+            val message = result?.message ?: "Qurilma boshqaruvi mavjud emas"
+            speak(message)
+            reportActionStatus("device", message)
+            message
+        } catch (t: Throwable) {
+            Log.e(TAG, "executeDeviceCommand error: ${t.message}")
+            "Xatolik"
+        }
+    }
+
+    fun getDeviceInfo(infoType: String): String? {
+        return try {
+            val controller = device() ?: return null
+            when (infoType.lowercase()) {
+                "battery" -> {
+                    val battery = controller.getBatteryInfo()
+                    "Batareya: ${battery.percentage}%, ${if (battery.isCharging) "quvvatlanmoqda" else "quvvatlanmayapti"}"
+                }
+                "memory" -> {
+                    val memory = controller.getMemoryInfo()
+                    "RAM: ${memory.availableMemory / (1024 * 1024)}MB bo'sh / ${memory.totalMemory / (1024 * 1024)}MB"
+                }
+                "wifi" -> "WiFi: ${controller.getWifiInfo()?.ssid ?: "ulanmagan"}"
+                "volume" -> "Media: ${controller.getMediaVolume()}/${controller.getMaxMediaVolume()}"
+                else -> null
+            }
+        } catch (t: Throwable) {
+            Log.e(TAG, "getDeviceInfo error: ${t.message}")
+            null
+        }
+    }
+
+    /** Short spoken confirmation. TTS is created on demand, never at bind time. */
     fun speak(message: String) {
+        if (message.isBlank()) return
         try {
-            speechManager.speak(message)
-        } catch (e: Exception) {
-            Log.e(TAG, "speak error: ${e.message}")
+            if (prefs()?.isVoiceFeedbackEnabled == false) return
+
+            val existing = ttsRef
+            if (existing != null) {
+                existing.speak(message, TextToSpeech.QUEUE_ADD, null, utteranceId())
+                return
+            }
+
+            val engine = TextToSpeech(applicationContext) { status ->
+                try {
+                    if (status == TextToSpeech.SUCCESS) {
+                        try {
+                            ttsRef?.language = Locale("uz", "UZ")
+                        } catch (t: Throwable) {
+                            Log.e(TAG, "TTS language error: ${t.message}")
+                        }
+                        ttsRef?.speak(message, TextToSpeech.QUEUE_ADD, null, utteranceId())
+                    } else {
+                        Log.e(TAG, "TTS init failed: $status")
+                    }
+                } catch (t: Throwable) {
+                    Log.e(TAG, "TTS callback error: ${t.message}")
+                }
+            }
+            ttsRef = engine
+        } catch (t: Throwable) {
+            Log.e(TAG, "speak error: ${t.message}")
         }
     }
 
     fun speakIntro() {
-        try {
-            speechManager.speakIntro()
-        } catch (e: Exception) {
-            Log.e(TAG, "speakIntro error: ${e.message}")
-        }
+        speak("Revilend AI tayyor, sizni tinglamoqdaman.")
     }
+
+    private fun utteranceId(): String = "revilend-${System.currentTimeMillis()}"
 
     private fun reportActionStatus(action: String, message: String) {
         try {
-            preferencesManager.saveActionStatus(action, message)
-        } catch (e: Exception) {
-            Log.e(TAG, "reportActionStatus error: ${e.message}")
+            prefs()?.saveActionStatus(action, message)
+        } catch (t: Throwable) {
+            Log.e(TAG, "reportActionStatus error: ${t.message}")
         }
     }
 
-    private fun cleanup() {
-        rootNode = null
-        lastFocusedNode = null
-    }
-
-    override fun onDestroy() {
-        try {
-            if (instance === this) instance = null
-            cleanup()
-            speechManager.shutdown()
-            tts?.shutdown()
-        } catch (e: Exception) {
-            Log.e(TAG, "onDestroy error: ${e.message}")
-        }
-        super.onDestroy()
-    }
-
-    private fun createBundleForSetText(text: String): android.os.Bundle {
-        return android.os.Bundle().apply {
+    private fun createBundleForSetText(text: String): Bundle {
+        return Bundle().apply {
             putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
         }
     }

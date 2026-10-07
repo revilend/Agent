@@ -110,11 +110,12 @@
                 android:value="voice_assistant_overlay" />
         </service>
 
-        <!-- Accessibility Service -->
+        <!-- Accessibility Service.
+             All configuration lives in @xml/accessibility_service_config; the manifest
+             entry only declares the binding permission and the service intent filter. -->
         <service
             android:name=".service.AgentAccessibilityService"
-            android:accessibilityFlags="flagIncludeNotImportantViews|flagRetrieveInteractiveWindows"
-            android:canRetrieveWindowContent="true"
+            android:label="@string/app_name"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
             android:exported="true">
             <intent-filter>

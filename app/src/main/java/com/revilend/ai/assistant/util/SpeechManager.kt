@@ -21,6 +21,14 @@ class SpeechManager(private val context: Context) {
         private const val WAKE_WORD = "revilend"
         private const val WAKE_WORD_CYRILLIC = "ревиленд"
         private const val RESTART_DELAY_MS = 350L
+
+        /**
+         * Back-off used after a recognizer error. Restarting the recognizer every
+         * few hundred milliseconds keeps the app busy enough that MIUI's battery
+         * manager kills the process - which in turn kills the accessibility service
+         * and makes Android report it as malfunctioning.
+         */
+        private const val ERROR_RESTART_DELAY_MS = 2000L
     }
 
     private var speechRecognizer: SpeechRecognizer? = null
@@ -102,7 +110,7 @@ class SpeechManager(private val context: Context) {
                 isListening = false
                 handleSpeechError(errorCode)
                 // Keep the background listener alive across errors (timeouts, no-match, busy).
-                scheduleRestart(RESTART_DELAY_MS * 2)
+                scheduleRestart(ERROR_RESTART_DELAY_MS)
             }
 
             override fun onResults(results: android.os.Bundle?) {
