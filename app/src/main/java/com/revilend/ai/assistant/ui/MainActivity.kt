@@ -1,14 +1,22 @@
 package com.revilend.ai.assistant.ui
 
+import android.Manifest
+import android.accessibilityservice.AccessibilityServiceInfo
+import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.graphics.Color
 import android.net.Uri
 import android.os.Bundle
 import android.provider.Settings
 import android.util.Log
 import android.view.View
+import android.view.accessibility.AccessibilityManager
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import com.google.android.material.card.MaterialCardView
 import com.google.android.material.switchmaterial.SwitchMaterial
@@ -56,10 +64,10 @@ class MainActivity : AppCompatActivity() {
             openOverlaySettings()
         }
         binding.btnMicsms.setOnClickListener {
-            openAppSettings()
+            requestMediaPermissions()
         }
         binding.btnCamera.setOnClickListener {
-            openAppSettings()
+            requestCameraPermission()
         }
         binding.btnNotifications.setOnClickListener {
             openNotificationsSettings()
@@ -93,9 +101,30 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updatePermissionStatus() {
-        binding.tvOverlayStatus.text = if (canDrawOverlays()) "✅ Grantylangan" else "❌ Ruxsatsiz"
-        binding.tvAccessibilityStatus.text = if (isAccessibilityEnabled()) "✅ Joylashtirilgan" else "❌ Yoʻq"
+        val overlayGranted = canDrawOverlays()
+        binding.tvOverlayStatus.text = if (overlayGranted) "✅ Grantylangan" else "❌ Ruxsatsiz"
+        binding.tvOverlayStatus.setTextColor(if (overlayGranted) GREEN else RED)
+
+        val accessGranted = isAccessibilityEnabled()
+        binding.tvAccessibilityStatus.text = if (accessGranted) "✅ Joylashtirilgan" else "❌ Yoʻq"
+        binding.tvAccessibilityStatus.setTextColor(if (accessGranted) GREEN else RED)
+
+        val mic = hasPermission(Manifest.permission.RECORD_AUDIO)
+        val phone = hasPermission(Manifest.permission.CALL_PHONE)
+        val sms = hasPermission(Manifest.permission.SEND_SMS)
+        binding.tvMicsmsStatus.text =
+            "🎤 Mikrofon: ${mark(mic)}   📞 Telefon: ${mark(phone)}   💬 SMS: ${mark(sms)}"
+        binding.tvMicsmsStatus.setTextColor(if (mic && phone && sms) GREEN else RED)
+
+        val camera = hasPermission(Manifest.permission.CAMERA)
+        binding.tvCameraStatus.text = "📷 Kamera: ${mark(camera)}"
+        binding.tvCameraStatus.setTextColor(if (camera) GREEN else RED)
     }
+
+    private fun mark(granted: Boolean): String = if (granted) "✅ Grantylangan" else "❌ Ruxsatsiz"
+
+    private fun hasPermission(permission: String): Boolean =
+        ContextCompat.checkSelfPermission(this, permission) == PackageManager.PERMISSION_GRANTED
 
     private fun canDrawOverlays(): Boolean {
         return if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
@@ -106,8 +135,38 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun isAccessibilityEnabled(): Boolean {
-        val am = getSystemService(android.view.accessibility.AccessibilityManager::class.java)
-        return am.isEnabled && am.isTouchExplorationEnabled
+        val am = getSystemService(Context.ACCESSIBILITY_SERVICE) as? AccessibilityManager ?: return false
+        if (!am.isEnabled) return false
+        val enabledServices = am.getEnabledAccessibilityServiceList(AccessibilityServiceInfo.FEEDBACK_ALL_MASK)
+        for (info in enabledServices) {
+            val serviceInfo = info.resolveInfo?.serviceInfo ?: continue
+            if (serviceInfo.packageName == packageName &&
+                serviceInfo.name == AgentAccessibilityService::class.java.name
+            ) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private fun requestMediaPermissions() {
+        ActivityCompat.requestPermissions(
+            this,
+            arrayOf(
+                Manifest.permission.RECORD_AUDIO,
+                Manifest.permission.CALL_PHONE,
+                Manifest.permission.SEND_SMS
+            ),
+            PERMISSION_REQUEST_CODE
+        )
+    }
+
+    private fun requestCameraPermission() {
+        ActivityCompat.requestPermissions(
+            this,
+            arrayOf(Manifest.permission.CAMERA),
+            PERMISSION_REQUEST_CODE
+        )
     }
 
     private fun startHudService() {
@@ -212,8 +271,22 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        // Re-check every permission dynamically so returning from Android Settings
+        // immediately flips the status labels to green without restarting the app.
         checkPermissions()
         updatePermissionStatus()
+        loadSettings()
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == PERMISSION_REQUEST_CODE) {
+            updatePermissionStatus()
+        }
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: android.content.Intent?) {
@@ -247,5 +320,8 @@ class MainActivity : AppCompatActivity() {
     companion object {
         private const val TAG = "MainActivity"
         private const val SPEECH_REQUEST_CODE = 1001
+        private const val PERMISSION_REQUEST_CODE = 2001
+        private val GREEN = Color.parseColor("#22C55E")
+        private val RED = Color.parseColor("#EF4444")
     }
 }

@@ -18,12 +18,29 @@ class SpeechManager(private val context: Context) {
     companion object {
         private const val TAG = "SpeechManager"
         private const val DEFAULT_LANGUAGE = "uz-UZ"
+        private const val WAKE_WORD = "revilend"
+        private const val WAKE_WORD_CYRILLIC = "ревиленд"
+        private const val RESTART_DELAY_MS = 350L
     }
 
     private var speechRecognizer: SpeechRecognizer? = null
     private var tts: TextToSpeech? = null
     private var isListening = false
     private var isInitialized = false
+
+    private val handler = android.os.Handler(android.os.Looper.getMainLooper())
+    private var continuousMode = false
+    private var shouldRestart = false
+
+    /** Invoked when a wake word is followed by a command (command text passed in). */
+    var wakeWordListener: ((String) -> Unit)? = null
+
+    /** Invoked when only the wake word is detected, with no follow-up command. */
+    var onWakeWordOnly: (() -> Unit)? = null
+
+    private val restartRunnable = Runnable {
+        if (continuousMode && shouldRestart) startListeningInternal()
+    }
 
     private val _speechState = MutableStateFlow<SpeechState>(SpeechState.Idle)
     val speechState: StateFlow<SpeechState> = _speechState.asStateFlow()
@@ -77,17 +94,22 @@ class SpeechManager(private val context: Context) {
             override fun onEndOfSpeech() {
                 Log.d(TAG, "End of speech")
                 _speechState.value = SpeechState.Processing
+                scheduleRestart(RESTART_DELAY_MS)
             }
 
             override fun onError(errorCode: Int) {
                 Log.e(TAG, "Speech error: $errorCode")
                 isListening = false
                 handleSpeechError(errorCode)
+                // Keep the background listener alive across errors (timeouts, no-match, busy).
+                scheduleRestart(RESTART_DELAY_MS * 2)
             }
 
             override fun onResults(results: android.os.Bundle?) {
                 Log.d(TAG, "Results received")
+                handler.removeCallbacks(restartRunnable)
                 processResults(results)
+                scheduleRestart(RESTART_DELAY_MS)
             }
 
             override fun onPartialResults(partialResults: android.os.Bundle?) {
@@ -157,6 +179,81 @@ class SpeechManager(private val context: Context) {
         }
     }
 
+    /**
+     * Starts continuous background listening for the "Revilend" wake word.
+     * The recognizer restarts itself after every result, timeout, or error.
+     */
+    fun startWakeWordListening() {
+        if (!isInitialized) initialize()
+        continuousMode = true
+        shouldRestart = true
+        handler.removeCallbacks(restartRunnable)
+        startListeningInternal()
+    }
+
+    /** Stops continuous wake-word listening. */
+    fun stopWakeWordListening() {
+        continuousMode = false
+        shouldRestart = false
+        handler.removeCallbacks(restartRunnable)
+        stopListening()
+    }
+
+    fun isWakeWordListening(): Boolean = continuousMode
+
+    private fun startListeningInternal() {
+        if (speechRecognizer == null) initialize()
+        val recognizer = speechRecognizer
+        if (recognizer == null) {
+            Log.e(TAG, "SpeechRecognizer not available for restart")
+            return
+        }
+        val intent = createSpeechIntent()
+        try {
+            recognizer.startListening(intent)
+            isListening = true
+            _speechState.value = SpeechState.Listening
+        } catch (e: Exception) {
+            Log.e(TAG, "Restart listening failed: ${e.message}")
+            scheduleRestart(RESTART_DELAY_MS * 3)
+        }
+    }
+
+    private fun scheduleRestart(delayMs: Long) {
+        if (!continuousMode || !shouldRestart) return
+        handler.removeCallbacks(restartRunnable)
+        handler.postDelayed(restartRunnable, delayMs)
+    }
+
+    /**
+     * Returns the command that follows the wake word, or null when the wake word
+     * is absent. An empty (blank) result means the bare wake word was spoken.
+     */
+    private fun extractWakeWordCommand(raw: String): String? {
+        val lower = raw.lowercase(Locale.getDefault())
+        val candidates = listOf(WAKE_WORD_CYRILLIC, WAKE_WORD)
+        for (candidate in candidates) {
+            val index = lower.indexOf(candidate)
+            if (index >= 0) {
+                return raw.substring(index + candidate.length)
+                    .trim()
+                    .trimStart(',', '.', '!', '?', ':', '-', ' ')
+                    .trim()
+            }
+        }
+        return null
+    }
+
+    private fun handleWakeWord(text: String) {
+        val command = extractWakeWordCommand(text) ?: return
+        Log.d(TAG, "Wake word detected, command=\"$command\"")
+        if (command.isBlank()) {
+            onWakeWordOnly?.invoke()
+        } else {
+            wakeWordListener?.invoke(command)
+        }
+    }
+
     fun stopListening() {
         if (speechRecognizer != null && isListening) {
             try {
@@ -193,6 +290,7 @@ class SpeechManager(private val context: Context) {
                 _speechResult.value = bestMatch
                 _speechState.value = SpeechState.Finished(bestMatch)
                 Log.d(TAG, "Speech result: $bestMatch")
+                if (continuousMode) handleWakeWord(bestMatch)
             }
         } else {
             _speechState.value = SpeechState.Error("No results")
@@ -280,6 +378,9 @@ class SpeechManager(private val context: Context) {
     }
 
     fun shutdown() {
+        continuousMode = false
+        shouldRestart = false
+        handler.removeCallbacks(restartRunnable)
         stopListening()
         speechRecognizer?.destroy()
         speechRecognizer = null

@@ -1,13 +1,18 @@
 package com.revilend.ai.assistant.agent
 
 import android.content.Context
+import android.os.Handler
+import android.os.Looper
+import android.speech.tts.TextToSpeech
 import android.util.Log
+import android.widget.Toast
 import com.google.gson.Gson
 import com.google.gson.annotations.SerializedName
 import com.revilend.ai.assistant.control.DeviceController
 import com.revilend.ai.assistant.util.PreferencesManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.util.Locale
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -27,6 +32,24 @@ class AgentBrain(private val context: Context) {
     private val deviceController = DeviceController(context)
     private val prefs = PreferencesManager(context)
     private val gson = Gson()
+
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private var tts: TextToSpeech? = null
+
+    init {
+        try {
+            tts = TextToSpeech(context.applicationContext) { status ->
+                if (status == TextToSpeech.SUCCESS) {
+                    tts?.language = Locale("uz", "UZ")
+                    Log.d(TAG, "Agent TTS initialized")
+                } else {
+                    Log.e(TAG, "Agent TTS init failed: $status")
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Agent TTS error: ${e.message}")
+        }
+    }
 
     private val client = OkHttpClient.Builder()
         .connectTimeout(TIMEOUT_SECONDS, TimeUnit.SECONDS)
@@ -87,6 +110,81 @@ class AgentBrain(private val context: Context) {
     fun setGoal(goal: String) {
         currentGoal = goal
         Log.d(TAG, "Goal set: $goal")
+    }
+
+    /**
+     * Entry point for a hands-free (wake word) voice command.
+     * Runs the Groq request strictly on [Dispatchers.IO], executes the resulting
+     * action, then gives both spoken (TTS) and on-screen (Toast) feedback.
+     */
+    suspend fun processCommand(command: String): AgentResponse = withContext(Dispatchers.IO) {
+        if (command.isBlank()) {
+            val empty = AgentResponse(action = "talk", message = "Buyruq bo'sh", done = true)
+            speakAndToast(empty.message ?: "")
+            return@withContext empty
+        }
+
+        Log.d(TAG, "processCommand: $command")
+        setGoal(command)
+        isRunning = true
+
+        val actionResponse: AgentResponse = try {
+            val raw = sendToGroq(buildPrompt(command, captureScreenState()))
+            gson.fromJson(raw, AgentResponse::class.java) ?: fallbackAgentResponse(command)
+        } catch (e: Exception) {
+            Log.e(TAG, "processCommand network error: ${e.message}")
+            fallbackAgentResponse(command)
+        }
+
+        val actionData: Any? = actionResponse.parameters ?: actionResponse.message
+        val execResult: AgentResponse = try {
+            executeAction(AgentAction(action = actionResponse.action, target = actionResponse.target, data = actionData))
+        } catch (e: Exception) {
+            Log.e(TAG, "processCommand exec error: ${e.message}")
+            actionResponse.copy(message = e.message ?: actionResponse.message)
+        }
+
+        val feedback = execResult.message ?: actionResponse.message ?: "Bajarildi"
+        speakAndToast(feedback)
+        isRunning = false
+        execResult
+    }
+
+    /** Speaks [message] via TTS and shows a Toast so the user always gets feedback. */
+    fun speakAndToast(message: String) {
+        if (message.isBlank()) return
+        mainHandler.post {
+            try {
+                Toast.makeText(context.applicationContext, message, Toast.LENGTH_SHORT).show()
+            } catch (e: Exception) {
+                Log.e(TAG, "Toast error: ${e.message}")
+            }
+        }
+        try {
+            tts?.speak(message, TextToSpeech.QUEUE_FLUSH, null, System.currentTimeMillis().toString())
+        } catch (e: Exception) {
+            Log.e(TAG, "Agent TTS speak error: ${e.message}")
+        }
+    }
+
+    private fun fallbackAgentResponse(command: String): AgentResponse {
+        return try {
+            gson.fromJson(getFallbackResponse(command), AgentResponse::class.java)
+                ?: AgentResponse(action = "talk", message = "Men tushunmadim", done = true)
+        } catch (e: Exception) {
+            Log.e(TAG, "Fallback parse error: ${e.message}")
+            AgentResponse(action = "talk", message = "Men tushunmadim", done = true)
+        }
+    }
+
+    fun shutdown() {
+        try {
+            tts?.stop()
+            tts?.shutdown()
+        } catch (e: Exception) {
+            Log.e(TAG, "Agent TTS shutdown error: ${e.message}")
+        }
+        tts = null
     }
 
     fun getGoal(): String = currentGoal

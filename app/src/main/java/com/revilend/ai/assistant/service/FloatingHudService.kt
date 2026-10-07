@@ -1,5 +1,6 @@
 package com.revilend.ai.assistant.service
 
+import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -8,6 +9,10 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.pm.PackageManager
+import android.content.pm.ServiceInfo
+import android.media.AudioManager
+import android.media.ToneGenerator
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.ColorMatrixColorFilter
@@ -39,9 +44,17 @@ import android.view.WindowManager
 import android.widget.FrameLayout
 import android.widget.TextView
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import com.revilend.ai.assistant.R
+import com.revilend.ai.assistant.agent.AgentBrain
 import com.revilend.ai.assistant.ui.MainActivity
 import com.revilend.ai.assistant.util.PreferencesManager
+import com.revilend.ai.assistant.util.SpeechManager
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.sin
@@ -62,6 +75,10 @@ class FloatingHudService : Service() {
     }
 
     private lateinit var preferencesManager: PreferencesManager
+    private lateinit var speechManager: SpeechManager
+    private lateinit var agentBrain: AgentBrain
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    private var toneGenerator: ToneGenerator? = null
     private var binding: FloatingHudLayout? = null
     private var windowManager: WindowManager? = null
     private var windowParams: WindowManager.LayoutParams? = null
@@ -123,12 +140,30 @@ class FloatingHudService : Service() {
         super.onCreate()
         Log.d(TAG, "FloatingHudService created")
         createNotificationChannel()
-        startForeground(NOTIFICATION_ID, createNotification())
         preferencesManager = PreferencesManager(this)
+        speechManager = SpeechManager(this)
+        agentBrain = AgentBrain(this)
+        toneGenerator = try {
+            ToneGenerator(AudioManager.STREAM_MUSIC, 80)
+        } catch (e: Exception) {
+            Log.e(TAG, "ToneGenerator init failed: ${e.message}")
+            null
+        }
+
+        // Declare the microphone foreground-service type only when we can legally record.
+        val micGranted = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) ==
+                PackageManager.PERMISSION_GRANTED
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && micGranted) {
+            startForeground(NOTIFICATION_ID, createNotification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
+        } else {
+            startForeground(NOTIFICATION_ID, createNotification())
+        }
 
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
         setupWindowParameters()
         setupFloatingView()
+        startAnimation()
+        setupWakeWordListening()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -152,6 +187,19 @@ class FloatingHudService : Service() {
 
     override fun onDestroy() {
         super.onDestroy()
+        stopAnimation()
+        serviceScope.cancel()
+        try {
+            if (::speechManager.isInitialized) {
+                speechManager.stopWakeWordListening()
+                speechManager.shutdown()
+            }
+            if (::agentBrain.isInitialized) agentBrain.shutdown()
+        } catch (e: Exception) {
+            Log.e(TAG, "Cleanup error: ${e.message}")
+        }
+        toneGenerator?.release()
+        toneGenerator = null
         binding?.let { view ->
             try {
                 windowManager?.removeView(view)
@@ -161,6 +209,73 @@ class FloatingHudService : Service() {
         }
         binding = null
         Log.d(TAG, "FloatingHudService destroyed")
+    }
+
+    // ---- Wake word ("Revilend") hands-free handling ----
+
+    private fun setupWakeWordListening() {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) !=
+                PackageManager.PERMISSION_GRANTED) {
+            Log.w(TAG, "RECORD_AUDIO not granted; wake word listening disabled")
+            return
+        }
+        speechManager.voiceLanguage = preferencesManager.voiceLanguage
+        speechManager.wakeWordListener = { command -> onWakeWordCommand(command) }
+        speechManager.onWakeWordOnly = { onWakeWordOnly() }
+        speechManager.startWakeWordListening()
+        Log.d(TAG, "Wake word listening started")
+    }
+
+    private fun onWakeWordOnly() {
+        Log.d(TAG, "Wake word only detected")
+        playActivationFeedback()
+        setState(HudState.Listening)
+        actionMessage = "Labbay?"
+        binding?.setActionMessage(actionMessage)
+        speechManager.speak("Labbay, sizni eshitmoqdaman")
+    }
+
+    private fun onWakeWordCommand(command: String) {
+        Log.d(TAG, "Wake word command: $command")
+        playActivationFeedback()
+        hudState = HudState.Thinking
+        stateTime = System.currentTimeMillis()
+        binding?.setState(HudState.Thinking)
+        actionMessage = command
+        binding?.setActionMessage(command)
+
+        serviceScope.launch {
+            try {
+                val response = agentBrain.processCommand(command)
+                actionMessage = response.message ?: command
+            } catch (e: Exception) {
+                Log.e(TAG, "processCommand failed: ${e.message}")
+                actionMessage = "Xato: ${e.message}"
+            } finally {
+                binding?.setActionMessage(actionMessage)
+                hudState = HudState.Action
+                stateTime = System.currentTimeMillis()
+                binding?.setState(HudState.Action)
+                handler.postDelayed({ resetToIdle() }, 2500)
+            }
+        }
+    }
+
+    private fun resetToIdle() {
+        hudState = HudState.Idle
+        stateTime = System.currentTimeMillis()
+        actionMessage = ""
+        binding?.setActionMessage("")
+        binding?.setState(HudState.Idle)
+    }
+
+    private fun playActivationFeedback() {
+        vibrate(40)
+        try {
+            toneGenerator?.startTone(ToneGenerator.TONE_PROP_BEEP, 120)
+        } catch (e: Exception) {
+            Log.e(TAG, "Tone error: ${e.message}")
+        }
     }
 
     private fun createNotificationChannel() {

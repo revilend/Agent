@@ -376,6 +376,14 @@
                             android:text="@string/microphone_phone_description"
                             android:textColor="@color/text_secondary"
                             android:textSize="@dimen/text_caption" />
+
+                        <TextView
+                            android:id="@+id/tv_micsms_status"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="@dimen/spacing_xs"
+                            android:textColor="@color/text_muted"
+                            android:textSize="@dimen/text_caption" />
                     </LinearLayout>
 
                     <com.google.android.material.button.MaterialButton
@@ -431,6 +439,14 @@
                             android:layout_height="wrap_content"
                             android:text="@string/camera_flashlight_description"
                             android:textColor="@color/text_secondary"
+                            android:textSize="@dimen/text_caption" />
+
+                        <TextView
+                            android:id="@+id/tv_camera_status"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="@dimen/spacing_xs"
+                            android:textColor="@color/text_muted"
                             android:textSize="@dimen/text_caption" />
                     </LinearLayout>
 
