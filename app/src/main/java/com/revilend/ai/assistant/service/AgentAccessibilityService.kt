@@ -493,7 +493,9 @@ class AgentAccessibilityService : AccessibilityService() {
         handler.postDelayed({
             try {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                    lastFocusedNode?.performAction(AccessibilityNodeInfo.ACTION_IME_ENTER)
+                    lastFocusedNode?.performAction(
+                        AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.id
+                    )
                 }
                 val submitLabels = listOf("send", "search", "yuborish", "qidirish", "go", "enter")
                 for (label in submitLabels) {
