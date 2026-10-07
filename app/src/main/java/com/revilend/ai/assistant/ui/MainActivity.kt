@@ -12,6 +12,7 @@ import android.provider.Settings
 import android.util.Log
 import android.view.View
 import android.view.accessibility.AccessibilityManager
+import android.view.inputmethod.InputMethodManager
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
@@ -21,6 +22,7 @@ import androidx.lifecycle.lifecycleScope
 import com.google.android.material.card.MaterialCardView
 import com.google.android.material.switchmaterial.SwitchMaterial
 import com.revilend.ai.assistant.R
+import com.revilend.ai.assistant.agent.AgentBrain
 import com.revilend.ai.assistant.databinding.ActivityMainBinding
 import com.revilend.ai.assistant.service.AgentAccessibilityService
 import com.revilend.ai.assistant.service.FloatingHudService
@@ -36,6 +38,10 @@ class MainActivity : AppCompatActivity() {
     private var isHudRunning = false
     private var lastPermissionSignature = ""
 
+    /** Shared brain: typed messages and voice commands both go through it. */
+    private val agentBrain by lazy { AgentBrain(applicationContext) }
+    private var taskRunning = false
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         binding = ActivityMainBinding.inflate(layoutInflater)
@@ -43,8 +49,16 @@ class MainActivity : AppCompatActivity() {
 
         prefs = PreferencesManager(this)
         setupUI()
+        setupTaskConsole()
         checkPermissions()
         loadSettings()
+        handleTaskConsoleIntent(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleTaskConsoleIntent(intent)
     }
 
     private fun setupUI() {
@@ -82,6 +96,88 @@ class MainActivity : AppCompatActivity() {
         // Voice command button
         binding.btnVoiceCommand.setOnClickListener {
             startSpeechRecognition()
+        }
+        binding.btnTaskMic.setOnClickListener {
+            startSpeechRecognition()
+        }
+    }
+
+    // ------------------------------------------------------ Task console
+
+    /** The typed "message box": whatever the user writes is executed by the agent. */
+    private fun setupTaskConsole() {
+        binding.btnTaskRun.setOnClickListener {
+            runTask(binding.etTaskInput.text?.toString().orEmpty())
+        }
+        binding.btnTaskClear.setOnClickListener {
+            binding.tvTaskLog.text = ""
+        }
+
+        agentBrain.stepListener = { message ->
+            binding.tvTaskStatus.text = message
+            appendLog("• $message")
+        }
+    }
+
+    private fun handleTaskConsoleIntent(intent: Intent?) {
+        if (intent?.getBooleanExtra(EXTRA_OPEN_TASK_CONSOLE, false) != true) return
+        binding.etTaskInput.requestFocus()
+        try {
+            val imm = getSystemService(INPUT_METHOD_SERVICE) as? InputMethodManager
+            imm?.showSoftInput(binding.etTaskInput, InputMethodManager.SHOW_IMPLICIT)
+        } catch (e: Exception) {
+            Log.e(TAG, "Keyboard error: ${e.message}")
+        }
+    }
+
+    /** Runs one task end to end and streams every agent step into the console. */
+    private fun runTask(task: String) {
+        val goal = task.trim()
+        if (goal.isEmpty()) {
+            Toast.makeText(this, R.string.task_empty, Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (taskRunning) {
+            Toast.makeText(this, "Avvalgi vazifa bajarilmoqda...", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        taskRunning = true
+        setTaskControlsEnabled(false)
+        binding.tvTaskStatus.text = getString(R.string.task_running)
+        appendLog("› $goal")
+
+        lifecycleScope.launch {
+            val response = try {
+                agentBrain.processCommand(goal)
+            } catch (e: Exception) {
+                Log.e(TAG, "runTask error: ${e.message}")
+                null
+            }
+            val answer = response?.message?.takeIf { it.isNotBlank() }
+                ?: getString(R.string.error_occurred)
+            binding.tvTaskStatus.text = if (response?.done == true) "✅ $answer" else "⏹ $answer"
+            appendLog(if (response?.done == true) "✅ $answer" else "⏹ $answer")
+            taskRunning = false
+            setTaskControlsEnabled(true)
+        }
+    }
+
+    private fun setTaskControlsEnabled(enabled: Boolean) {
+        binding.btnTaskRun.isEnabled = enabled
+        binding.btnTaskMic.isEnabled = enabled
+        binding.btnTaskRun.text = if (enabled) getString(R.string.task_run) else getString(R.string.task_running)
+    }
+
+    private fun appendLog(line: String) {
+        val current = binding.tvTaskLog.text?.toString().orEmpty()
+        val merged = if (current.isEmpty()) line else "$current\n$line"
+        // Keep only the last lines the log view can show, so the newest step stays visible.
+        val lines = merged.lines()
+        binding.tvTaskLog.text = if (lines.size > TASK_LOG_LINES) {
+            lines.takeLast(TASK_LOG_LINES).joinToString("\n")
+        } else {
+            merged
         }
     }
 
@@ -294,7 +390,7 @@ class MainActivity : AppCompatActivity() {
             .setTitle("Revilend AI")
             .setMessage(
                 "Revilend AI: Autonomous Super Assistant\n\n" +
-                "Version: 1.0.0\n\n" +
+                "Version: 1.3.0\n\n" +
                 "An AI-powered voice assistant for hands-free phone control.\n\n" +
                 "Features:\n" +
                 "• Floating HUD overlay\n" +
@@ -302,7 +398,10 @@ class MainActivity : AppCompatActivity() {
                 "• Accessibility-based automation\n" +
                 "• Device controls (torch, volume, battery)\n" +
                 "• Groq LLM integration\n\n" +
-                "Tap the floating button to speak commands."
+                "Usage:\n" +
+                "• Type your task in the message box and tap \"Bajarish\"\n" +
+                "• Or tap the floating HUD and speak\n" +
+                "• Long-press the HUD to open the message box anywhere"
             )
             .setPositiveButton("OK", null)
             .show()
@@ -338,28 +437,29 @@ class MainActivity : AppCompatActivity() {
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: android.content.Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode == SPEECH_REQUEST_CODE && resultCode == RESULT_OK) {
-            data?.let {
-                val results = it.getStringArrayListExtra(android.speech.RecognizerIntent.EXTRA_RESULTS)
-                results?.let { list ->
-                    val recognized = list.firstOrNull() ?: ""
-                    Log.d(TAG, "Speech recognized: $recognized")
-                    // Forward to accessibility service for processing
-                    forwardToAccessibility(recognized)
-                }
+            val recognized = data
+                ?.getStringArrayListExtra(android.speech.RecognizerIntent.EXTRA_RESULTS)
+                ?.firstOrNull()
+                .orEmpty()
+            Log.d(TAG, "Speech recognized: $recognized")
+            if (recognized.isNotBlank()) {
+                // Show what was heard inside the message box, then run it, so the
+                // voice path and the typed path do exactly the same thing.
+                binding.etTaskInput.setText(recognized)
+                runTask(recognized)
             }
+        } else if (requestCode == SPEECH_REQUEST_CODE) {
+            Toast.makeText(this, "Ovoz tanilmadi", Toast.LENGTH_SHORT).show()
         }
-    }
-
-    private fun forwardToAccessibility(command: String) {
-        // Broadcast to accessibility service
-        val intent = Intent("com.revilend.ai.assistant.ACTION_VOICE_COMMAND").apply {
-            putExtra("command", command)
-        }
-        sendBroadcast(intent)
-        Toast.makeText(this, "Processing: $command", Toast.LENGTH_SHORT).show()
     }
 
     override fun onDestroy() {
+        try {
+            agentBrain.stepListener = null
+            agentBrain.shutdown()
+        } catch (e: Exception) {
+            Log.e(TAG, "Shutdown error: ${e.message}")
+        }
         super.onDestroy()
     }
 
@@ -367,6 +467,11 @@ class MainActivity : AppCompatActivity() {
         private const val TAG = "MainActivity"
         private const val SPEECH_REQUEST_CODE = 1001
         private const val PERMISSION_REQUEST_CODE = 2001
+        private const val TASK_LOG_LINES = 12
+
+        /** Set by the floating HUD / notification to jump straight into the message box. */
+        const val EXTRA_OPEN_TASK_CONSOLE = "com.revilend.ai.assistant.EXTRA_OPEN_TASK_CONSOLE"
+
         private val GREEN = Color.parseColor("#22C55E")
         private val RED = Color.parseColor("#EF4444")
     }

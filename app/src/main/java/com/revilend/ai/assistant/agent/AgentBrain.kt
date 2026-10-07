@@ -71,6 +71,27 @@ class AgentBrain(private val context: Context) {
     private val actionHistory: MutableList<AgentAction> = mutableListOf()
     private var isRunning = false
 
+    /**
+     * Optional progress sink. The dashboard console and the floating HUD set this
+     * so the user sees every single step the agent takes while it works.
+     */
+    var stepListener: ((String) -> Unit)? = null
+
+    private fun notifyStep(message: String) {
+        if (message.isBlank()) return
+        try {
+            mainHandler.post {
+                try {
+                    stepListener?.invoke(message)
+                } catch (e: Exception) {
+                    Log.e(TAG, "stepListener error: ${e.message}")
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "notifyStep error: ${e.message}")
+        }
+    }
+
     inner class AgentAction(
         val action: String,
         val target: String? = null,
@@ -167,6 +188,7 @@ class AgentBrain(private val context: Context) {
                 val announce = parsed.message?.takeIf { it.isNotBlank() }
                     ?: "Qadam $step: ${parsed.action}"
                 speakAndToast(announce)
+                notifyStep(announce)
 
                 val actionData: Any? = parsed.data ?: parsed.parameters ?: parsed.message
                 val executed = try {
@@ -191,15 +213,20 @@ class AgentBrain(private val context: Context) {
                 if (!stepResult.isNullOrBlank() && stepResult != announce) {
                     speakAndToast(stepResult)
                 }
+                if (!stepResult.isNullOrBlank() && stepResult != announce) {
+                    notifyStep(stepResult)
+                }
                 delay(1000)
             }
             val finalMessage = last.message?.takeIf { it.isNotBlank() } ?: "Vazifa yakunlandi"
             last = last.copy(message = finalMessage)
             speakAndToast(finalMessage)
+            notifyStep(finalMessage)
         } catch (e: Exception) {
             Log.e(TAG, "runGoal error: ${e.message}")
             last = AgentResponse(action = "talk", message = "Xato: ${e.message}", done = true)
             speakAndToast(last.message ?: "")
+            notifyStep(last.message ?: "")
         } finally {
             isRunning = false
         }

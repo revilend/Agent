@@ -36,11 +36,14 @@ import android.service.dreams.DreamService
 import android.util.AttributeSet
 import android.util.Log
 import android.view.Gravity
+import android.view.LayoutInflater
 import android.view.MotionEvent
 import android.view.SurfaceHolder
 import android.view.TextureView
 import android.view.View
 import android.view.WindowManager
+import android.view.inputmethod.InputMethodManager
+import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.TextView
 import androidx.core.app.NotificationCompat
@@ -50,11 +53,16 @@ import com.revilend.ai.assistant.agent.AgentBrain
 import com.revilend.ai.assistant.ui.MainActivity
 import com.revilend.ai.assistant.util.PreferencesManager
 import com.revilend.ai.assistant.util.SpeechManager
+import com.revilend.ai.assistant.util.SpeechState
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.sin
@@ -72,6 +80,9 @@ class FloatingHudService : Service() {
         private const val ACTION_HIDE = "com.revilend.ai.assistant.ACTION_HIDE"
         private const val ACTION_SHOW = "com.revilend.ai.assistant.ACTION_SHOW"
         private const val ACTION_DOCK = "com.revilend.ai.assistant.ACTION_DOCK"
+
+        private const val LONG_PRESS_MS = 450L
+        private const val VOICE_CAPTURE_TIMEOUT_MS = 15000L
     }
 
     private lateinit var preferencesManager: PreferencesManager
@@ -88,6 +99,12 @@ class FloatingHudService : Service() {
     private var initialY = 0f
     private var initialTouchX = 0f
     private var initialTouchY = 0f
+    private var longPressFired = false
+    private var longPressRunnable: Runnable? = null
+    private var voiceCaptureJob: Job? = null
+
+    /** The floating "message box" (EditText + Yuborish) shown on HUD long-press. */
+    private var taskInputView: View? = null
 
     private val handler = Handler(Looper.getMainLooper())
     private val vibrator: Vibrator? by lazy {
@@ -159,6 +176,9 @@ class FloatingHudService : Service() {
             startForeground(NOTIFICATION_ID, createNotification())
         }
 
+        // Stream every agent step into the HUD banner so the user can see what it does.
+        agentBrain.stepListener = { message -> setActionMessage(message) }
+
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
         setupWindowParameters()
         setupFloatingView()
@@ -188,13 +208,19 @@ class FloatingHudService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         stopAnimation()
+        dismissTaskInput()
+        cancelLongPress()
+        voiceCaptureJob?.cancel()
         serviceScope.cancel()
         try {
             if (::speechManager.isInitialized) {
                 speechManager.stopWakeWordListening()
                 speechManager.shutdown()
             }
-            if (::agentBrain.isInitialized) agentBrain.shutdown()
+            if (::agentBrain.isInitialized) {
+                agentBrain.stepListener = null
+                agentBrain.shutdown()
+            }
         } catch (e: Exception) {
             Log.e(TAG, "Cleanup error: ${e.message}")
         }
@@ -238,27 +264,7 @@ class FloatingHudService : Service() {
     private fun onWakeWordCommand(command: String) {
         Log.d(TAG, "Wake word command: $command")
         playActivationFeedback()
-        hudState = HudState.Thinking
-        stateTime = System.currentTimeMillis()
-        binding?.setState(HudState.Thinking)
-        actionMessage = command
-        binding?.setActionMessage(command)
-
-        serviceScope.launch {
-            try {
-                val response = agentBrain.processCommand(command)
-                actionMessage = response.message ?: command
-            } catch (e: Exception) {
-                Log.e(TAG, "processCommand failed: ${e.message}")
-                actionMessage = "Xato: ${e.message}"
-            } finally {
-                binding?.setActionMessage(actionMessage)
-                hudState = HudState.Action
-                stateTime = System.currentTimeMillis()
-                binding?.setState(HudState.Action)
-                handler.postDelayed({ resetToIdle() }, 2500)
-            }
-        }
+        runAgentTask(command)
     }
 
     private fun resetToIdle() {
@@ -335,10 +341,9 @@ class FloatingHudService : Service() {
             updatePositionFromPrefs()
         }
 
-        binding?.setOnTouchListener { _, event ->
-            handleTouch(event)
-            false
-        }
+        // The listener must report true, otherwise the framework stops sending the
+        // rest of the gesture and taps/long-presses/drags never reach the HUD.
+        binding?.setOnTouchListener { _, event -> handleTouch(event) }
 
         windowManager?.addView(binding!!, windowParams!!)
         Log.d(TAG, "Floating view added")
@@ -352,11 +357,14 @@ class FloatingHudService : Service() {
                 initialTouchX = event.rawX
                 initialTouchY = event.rawY
                 isDragging = false
+                longPressFired = false
+                scheduleLongPress()
                 return true
             }
             MotionEvent.ACTION_MOVE -> {
-                if (!isDragging && abs(event.rawX - initialTouchX) > 10 && abs(event.rawY - initialTouchY) > 10) {
+                if (!isDragging && (abs(event.rawX - initialTouchX) > 10 || abs(event.rawY - initialTouchY) > 10)) {
                     isDragging = true
+                    cancelLongPress()
                     preferencesManager.isHudDocked = false
                     preferencesManager.isHudVisible = true
                 }
@@ -370,30 +378,52 @@ class FloatingHudService : Service() {
                 return true
             }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                cancelLongPress()
+                val params = windowParams
+
                 if (isDragging) {
                     isDragging = false
                     // Check if docked to edge
-                    val params = windowParams ?: return false
-                    val screenWidth = windowManager?.defaultDisplay?.width ?: 0
-                    val screenHeight = windowManager?.defaultDisplay?.height ?: 0
-                    val hudRadius = 120
+                    if (params != null) {
+                        val screenWidth = windowManager?.defaultDisplay?.width ?: 0
+                        val screenHeight = windowManager?.defaultDisplay?.height ?: 0
 
-                    if (params.x < 50 && params.y > screenHeight / 4 && params.y < screenHeight * 3 / 4) {
-                        // Docked to left edge - minimize
-                        isDocked = true
-                        preferencesManager.isHudDocked = true
-                        preferencesManager.isHudVisible = false
-                    } else if (params.x > screenWidth - 50 && params.y > screenHeight / 4 && params.y < screenHeight * 3 / 4) {
-                        // Docked to right edge - minimize
-                        isDocked = true
-                        preferencesManager.isHudDocked = true
-                        preferencesManager.isHudVisible = false
+                        if (params.x < 50 && params.y > screenHeight / 4 && params.y < screenHeight * 3 / 4) {
+                            // Docked to left edge - minimize
+                            isDocked = true
+                            preferencesManager.isHudDocked = true
+                            preferencesManager.isHudVisible = false
+                        } else if (params.x > screenWidth - 50 && params.y > screenHeight / 4 && params.y < screenHeight * 3 / 4) {
+                            // Docked to right edge - minimize
+                            isDocked = true
+                            preferencesManager.isHudDocked = true
+                            preferencesManager.isHudVisible = false
+                        }
                     }
+                } else if (!longPressFired && event.actionMasked == MotionEvent.ACTION_UP) {
+                    onHudTap()
                 }
                 return true
             }
         }
         return false
+    }
+
+    private fun scheduleLongPress() {
+        cancelLongPress()
+        val runnable = Runnable {
+            if (!isDragging) {
+                longPressFired = true
+                onHudLongPress()
+            }
+        }
+        longPressRunnable = runnable
+        handler.postDelayed(runnable, LONG_PRESS_MS)
+    }
+
+    private fun cancelLongPress() {
+        longPressRunnable?.let { handler.removeCallbacks(it) }
+        longPressRunnable = null
     }
 
     private fun updateViewPosition() {
@@ -407,33 +437,183 @@ class FloatingHudService : Service() {
         updateViewPosition()
     }
 
+    // ---- HUD gestures: tap = speak, long-press = type a message ----
+
     private fun onHudTap() {
         Log.d(TAG, "HUD tapped")
-        // Start speech recognition
-        val broadcastIntent = Intent(ACTION_SPEECH)
-        sendBroadcast(broadcastIntent)
-        vibrate(50)
-        hudState = HudState.Listening
-        stateTime = System.currentTimeMillis()
+        startVoiceCapture()
     }
 
     private fun onHudLongPress() {
         Log.d(TAG, "HUD long pressed")
-        // Open text input dialog
-        val broadcastIntent = Intent(ACTION_LONG_PRESS)
-        sendBroadcast(broadcastIntent)
-        vibrate(100)
-        hudState = HudState.Thinking
-        stateTime = System.currentTimeMillis()
+        showTaskInputOverlay()
     }
 
     private fun onSpeechRequested() {
         Log.d(TAG, "Speech requested")
-        // Forward to accessibility service or MainActivity
-        val intent = Intent(this, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK
+        openTaskConsole()
+    }
+
+    private fun openTaskConsole() {
+        try {
+            val intent = Intent(this, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
+                putExtra(MainActivity.EXTRA_OPEN_TASK_CONSOLE, true)
+            }
+            startActivity(intent)
+        } catch (e: Exception) {
+            Log.e(TAG, "Open task console error: ${e.message}")
         }
-        startActivity(intent)
+    }
+
+    /**
+     * Tap-to-talk: records one utterance, then runs it as a task.
+     * The wake-word loop is paused first because it owns the recognizer.
+     */
+    private fun startVoiceCapture() {
+        val micGranted = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) ==
+                PackageManager.PERMISSION_GRANTED
+        if (!micGranted) {
+            vibrate(60)
+            setState(HudState.Action)
+            setActionMessage(getString(R.string.no_permission))
+            handler.postDelayed({ resetToIdle() }, 2500)
+            return
+        }
+
+        vibrate(50)
+        setState(HudState.Listening)
+        setActionMessage(getString(R.string.task_listening))
+
+        try {
+            speechManager.stopWakeWordListening()
+            // Force a clean state so a previous result is not read as this capture's.
+            speechManager.cancelListening()
+            speechManager.startListening()
+        } catch (e: Exception) {
+            Log.e(TAG, "Voice capture start failed: ${e.message}")
+        }
+
+        voiceCaptureJob?.cancel()
+        voiceCaptureJob = serviceScope.launch {
+            val captured = withTimeoutOrNull(VOICE_CAPTURE_TIMEOUT_MS) {
+                speechManager.speechState
+                    .filter { it is SpeechState.Finished || it is SpeechState.Error }
+                    .first()
+            }
+            val command = (captured as? SpeechState.Finished)?.result?.trim().orEmpty()
+
+            // Always hand the recognizer back to the wake-word loop.
+            setupWakeWordListening()
+
+            if (command.isBlank()) {
+                setActionMessage("Eshitilmadi, qayta urinib ko'ring")
+                setState(HudState.Action)
+                handler.postDelayed({ resetToIdle() }, 2200)
+            } else {
+                runAgentTask(command)
+            }
+        }
+    }
+
+    /** Single entry point: typed messages, HUD message box and voice all use this. */
+    private fun runAgentTask(goal: String) {
+        val task = goal.trim()
+        if (task.isEmpty()) return
+        Log.d(TAG, "Agent task: $task")
+        vibrate(40)
+        setState(HudState.Thinking)
+        setActionMessage(task)
+
+        serviceScope.launch {
+            var message = task
+            try {
+                val response = agentBrain.processCommand(task)
+                message = response.message?.takeIf { it.isNotBlank() } ?: task
+            } catch (e: Exception) {
+                Log.e(TAG, "processCommand failed: ${e.message}")
+                message = "Xato: ${e.message}"
+            } finally {
+                setActionMessage(message)
+                setState(HudState.Action)
+                handler.postDelayed({ resetToIdle() }, 2500)
+            }
+        }
+    }
+
+    // ---- Floating message box ----
+
+    private fun showTaskInputOverlay() {
+        if (taskInputView != null) return
+        vibrate(100)
+        try {
+            val view = LayoutInflater.from(this).inflate(R.layout.hud_task_input, null)
+            val editText = view.findViewById<EditText>(R.id.et_hud_task)
+            val status = view.findViewById<TextView>(R.id.tv_hud_status)
+
+            val margins = (32 * resources.displayMetrics.density).toInt()
+            val width = (resources.displayMetrics.widthPixels - margins).coerceAtLeast(margins * 4)
+
+            val params = WindowManager.LayoutParams(
+                width,
+                WindowManager.LayoutParams.WRAP_CONTENT,
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+                } else {
+                    WindowManager.LayoutParams.TYPE_PHONE
+                },
+                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+                android.graphics.PixelFormat.TRANSLUCENT
+            ).apply {
+                gravity = Gravity.CENTER
+                softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE or
+                        WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE
+            }
+
+            view.findViewById<View>(R.id.btn_hud_cancel).setOnClickListener {
+                dismissTaskInput()
+            }
+            view.findViewById<View>(R.id.btn_hud_send).setOnClickListener {
+                val task = editText.text?.toString().orEmpty().trim()
+                if (task.isEmpty()) {
+                    status.text = getString(R.string.task_empty)
+                } else {
+                    dismissTaskInput()
+                    runAgentTask(task)
+                }
+            }
+
+            windowManager?.addView(view, params)
+            taskInputView = view
+
+            editText.requestFocus()
+            handler.postDelayed({
+                try {
+                    val imm = getSystemService(INPUT_METHOD_SERVICE) as? InputMethodManager
+                    imm?.showSoftInput(editText, InputMethodManager.SHOW_IMPLICIT)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Keyboard error: ${e.message}")
+                }
+            }, 250)
+        } catch (e: Exception) {
+            Log.e(TAG, "Task overlay error: ${e.message}")
+        }
+    }
+
+    private fun dismissTaskInput() {
+        val view = taskInputView ?: return
+        taskInputView = null
+        try {
+            val imm = getSystemService(INPUT_METHOD_SERVICE) as? InputMethodManager
+            imm?.hideSoftInputFromWindow(view.windowToken, 0)
+        } catch (e: Exception) {
+            Log.e(TAG, "Hide keyboard error: ${e.message}")
+        }
+        try {
+            windowManager?.removeView(view)
+        } catch (e: Exception) {
+            Log.e(TAG, "Remove task overlay error: ${e.message}")
+        }
     }
 
     private fun hideHud() {
@@ -565,6 +745,16 @@ class FloatingHudLayout @JvmOverloads constructor(
 
     private var glowShader: SweepGradient? = null
     private var glowRadius = 100f
+
+    /**
+     * A plain custom View resolves WRAP_CONTENT to the parent's full size, which made
+     * the HUD a screen-sized invisible window that swallowed every touch and drew its
+     * circle in the middle of the screen. Pin it to a small fixed square instead.
+     */
+    override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+        val size = (HUD_SIZE_DP * resources.displayMetrics.density).toInt()
+        setMeasuredDimension(size, size)
+    }
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
@@ -739,7 +929,7 @@ class FloatingHudLayout @JvmOverloads constructor(
 
     private fun drawActionBanner(canvas: Canvas, cx: Float, cy: Float) {
         if (actionMessage.isNotEmpty()) {
-            val bannerWidth = 400f
+            val bannerWidth = Math.min(400f, width - 16f)
             val bannerHeight = 30f
             val bannerY = cy + 80f
 
@@ -785,7 +975,8 @@ class FloatingHudLayout @JvmOverloads constructor(
     }
 
     fun setActionMessage(message: String) {
-        actionMessage = message
+        // Keep the banner readable inside the fixed-size HUD window.
+        actionMessage = if (message.length > 42) message.take(41) + "…" else message
         invalidate()
     }
 
@@ -794,6 +985,8 @@ class FloatingHudLayout @JvmOverloads constructor(
         invalidate()
     }
 }
+
+private const val HUD_SIZE_DP = 200
 
 private fun abs(value: Float): Float = kotlin.math.abs(value)
 private fun sin(value: Double): Double = kotlin.math.sin(value)

@@ -57,6 +57,19 @@
 
     <string name="hint">Revilend AI</string>
 
+    <!-- Task console -->
+    <string name="task_console_title">Vazifa yozish</string>
+    <string name="task_console_description">Topshiriqni yozing — Revilend AI o\'zi bajaradi</string>
+    <string name="task_console_hint">Masalan: Telegramni och va do\'stimga qo\'ng\'iroq qil</string>
+    <string name="task_run">Bajarish</string>
+    <string name="task_send">Yuborish</string>
+    <string name="task_ready">Tayyor. Vazifangizni yozing yoki mikrofonga bosing.</string>
+    <string name="task_running">Bajarilmoqda...</string>
+    <string name="task_listening">Tinglamoqda...</string>
+    <string name="task_empty">Avval vazifani yozing</string>
+    <string name="task_answer_title">Revilend AI javobi</string>
+    <string name="task_clear">Tozalash</string>
+
     <!-- Voice intro -->
     <string name="voice_intro_uz">Revilend AI tayyor, sizni tinglamoqdaman.</string>
     <string name="voice_intro_ru">Revilend AI готов, я вас слушаю.</string>
